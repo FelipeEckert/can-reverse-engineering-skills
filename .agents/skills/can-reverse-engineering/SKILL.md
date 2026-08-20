@@ -482,7 +482,12 @@ inside the skill.
    correlate → bitsearch → calibration/verification; never copy a reference-free proposal
    into a DBC as fact. Read `references/automotive-signal-priors.md` when using this stage.
 
-   **Optional opendbc setup is external and portable.** Build the read-only index with
+   **Optional opendbc setup is external and portable.** Opendbc is not required for the
+   reverse-engineering workflow. To prepare an organized symlink corpus from any local
+   checkout, run `python scripts/setup_opendbc_corpus.py \
+       --opendbc-root /path/to/opendbc --corpus-out /path/to/opendbc-corpus`; add
+   `--generate` if the checkout's official generated DBC outputs are missing. Then build
+   the read-only index with
    `python scripts/opendbc_reference.py --corpus /path/to/opendbc-corpus \
        --out-dir /path/to/opendbc-reference`, or set `CAN_RE_OPENDDBC_CORPUS` instead of
    passing `--corpus`. Supply the resulting `signals.tsv` to physical hypotheses with
