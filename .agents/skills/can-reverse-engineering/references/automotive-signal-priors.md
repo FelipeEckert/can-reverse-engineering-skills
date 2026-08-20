@@ -51,6 +51,15 @@ These are common conventions, not an exhaustive catalog. Exact opendbc evidence 
 reported only through the read-only prior lookup as corpus precedent, not decoding
 confidence.
 
+The corpus index is optional and may live outside the working repository. Build it with
+`opendbc_reference.py --corpus /path/to/opendbc-corpus --out-dir /path/to/opendbc-reference`,
+then pass
+`--opendbc-signals /path/to/opendbc-reference/signals.tsv` to
+`physical_hypotheses.py`. Alternatively set `CAN_RE_OPENDDBC_CORPUS` for indexing and
+`CAN_RE_OPENDDBC_SIGNALS` for lookup. Explicit CLI paths take precedence. With no
+configured signals index, physical-hypothesis generation continues with corpus precedent
+marked unavailable; no exact match is neutral evidence.
+
 ## Use in the workflow
 
 Run this only after candidate geometry has been narrowed by survey/candidate

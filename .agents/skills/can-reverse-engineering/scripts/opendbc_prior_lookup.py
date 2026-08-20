@@ -207,8 +207,14 @@ def selftest(signals_path: Path) -> None:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--signals", type=Path, default=priors.DEFAULT_SIGNALS, help="input signals.tsv")
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=f"Alternatively set {priors.SIGNALS_ENV}=/path/to/signals.tsv.",
+    )
+    parser.add_argument(
+        "--signals", type=Path,
+        help=f"input signals.tsv; takes precedence over {priors.SIGNALS_ENV}",
+    )
     parser.add_argument("--family", help="canonical prior family key")
     parser.add_argument("--bit-length", type=int)
     parser.add_argument("--signedness", choices=("signed", "unsigned"))
@@ -221,12 +227,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    if not args.signals.is_file():
-        print(f"error: input not found: {args.signals}", file=sys.stderr)
+    signals_path = priors.resolve_signals_path(args.signals)
+    if signals_path is None:
+        print(
+            "error: indexed opendbc signals are not configured; pass "
+            f"--signals /path/to/signals.tsv or set {priors.SIGNALS_ENV}",
+            file=sys.stderr,
+        )
+        return 2
+    if not signals_path.is_file():
+        print(f"error: input not found: {signals_path}", file=sys.stderr)
         return 2
     try:
         if args.selftest:
-            selftest(args.signals)
+            selftest(signals_path)
             return 0
         required = {
             "--family": args.family,
@@ -238,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         missing = [flag for flag, value in required.items() if value is None]
         if missing:
             raise ValueError(f"missing required query arguments: {', '.join(missing)}")
-        document = load_prior_document(args.signals)
+        document = load_prior_document(signals_path)
         result = lookup_exact(
             document,
             family=args.family,

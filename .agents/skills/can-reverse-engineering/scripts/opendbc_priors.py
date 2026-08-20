@@ -13,6 +13,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
 import sys
 from collections import Counter, defaultdict
@@ -21,8 +22,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
 
-DEFAULT_SIGNALS = Path("temp-output/opendbc-reference/signals.tsv")
 DEFAULT_OUTPUT_DIR = Path("temp-output/opendbc-priors")
+SIGNALS_ENV = "CAN_RE_OPENDDBC_SIGNALS"
 JSON_NAME = "opendbc-priors.json"
 MARKDOWN_NAME = "opendbc-priors.md"
 
@@ -55,6 +56,13 @@ PARSER_GROUPS = {
 VALID_ORIGINS = {"direct", "generated"}
 NON_INDEPENDENT_FAMILIES = {"Unclassified"}
 STRENGTH_ORDER = {"strong": 0, "moderate": 1, "weak": 2, "insufficient": 3}
+
+
+def resolve_signals_path(explicit: Path | None = None) -> Path | None:
+    """Resolve an indexed signals.tsv from CLI/programmatic input, then environment."""
+
+    configured = explicit if explicit is not None else os.environ.get(SIGNALS_ENV)
+    return Path(configured).expanduser() if configured else None
 
 
 def normalized(value: str) -> str:
@@ -872,8 +880,14 @@ def selftest() -> None:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--signals", type=Path, default=DEFAULT_SIGNALS, help="input signals.tsv")
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=f"Alternatively set {SIGNALS_ENV}=/path/to/signals.tsv.",
+    )
+    parser.add_argument(
+        "--signals", type=Path,
+        help=f"input signals.tsv; takes precedence over {SIGNALS_ENV}",
+    )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="output directory")
     parser.add_argument("--selftest", action="store_true", help="run in-memory checks and exit")
     return parser.parse_args(argv)
@@ -884,14 +898,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.selftest:
         selftest()
         return 0
-    if not args.signals.is_file():
-        print(f"error: input not found: {args.signals}", file=sys.stderr)
+    signals_path = resolve_signals_path(args.signals)
+    if signals_path is None:
+        print(
+            "error: indexed opendbc signals are not configured; pass "
+            f"--signals /path/to/signals.tsv or set {SIGNALS_ENV}",
+            file=sys.stderr,
+        )
+        return 2
+    if not signals_path.is_file():
+        print(f"error: input not found: {signals_path}", file=sys.stderr)
         return 2
     try:
-        ensure_output_is_separate(args.signals, args.out_dir)
-        source_hash = sha256_file(args.signals)
-        rows, _ = read_rows(args.signals)
-        document = build_document(rows, args.signals, source_hash)
+        ensure_output_is_separate(signals_path, args.out_dir)
+        source_hash = sha256_file(signals_path)
+        rows, _ = read_rows(signals_path)
+        document = build_document(rows, signals_path, source_hash)
         json_text = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
         markdown_text = render_markdown(document)
         args.out_dir.mkdir(parents=True, exist_ok=True)

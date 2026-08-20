@@ -167,16 +167,23 @@ def build_hypothesis(
     }
 
 
-def load_corpus_document() -> tuple[dict[str, object] | None, str | None]:
+def load_corpus_document(
+    signals_path: Path | None = None,
+) -> tuple[dict[str, object] | None, str | None]:
     """Load optional corpus evidence through the lookup layer, failing open."""
 
     if opendbc_prior_lookup is None:
         return None, f"lookup layer unavailable: {OPENDBC_IMPORT_ERROR}"
     try:
-        signals_path = opendbc_prior_lookup.priors.DEFAULT_SIGNALS
-        if not signals_path.is_file():
-            raise FileNotFoundError(f"indexed corpus not found: {signals_path}")
-        return opendbc_prior_lookup.load_prior_document(signals_path), None
+        resolved = opendbc_prior_lookup.priors.resolve_signals_path(signals_path)
+        if resolved is None:
+            return None, (
+                "indexed corpus not configured; pass --opendbc-signals "
+                f"/path/to/signals.tsv or set {opendbc_prior_lookup.priors.SIGNALS_ENV}"
+            )
+        if not resolved.is_file():
+            raise FileNotFoundError(f"indexed corpus not found: {resolved}")
+        return opendbc_prior_lookup.load_prior_document(resolved), None
     except Exception as exc:  # Annotation failures must not alter normal generation.
         return None, f"corpus precedent unavailable: {type(exc).__name__}: {exc}"
 
@@ -269,17 +276,31 @@ def corpus_console_summary(annotation: dict[str, Any]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    signals_env = (
+        opendbc_prior_lookup.priors.SIGNALS_ENV
+        if opendbc_prior_lookup is not None else "CAN_RE_OPENDDBC_SIGNALS"
+    )
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=f"Alternatively set {signals_env}=/path/to/signals.tsv.",
+    )
     parser.add_argument("--candidates", required=True, help="candidate JSON with field metadata")
     parser.add_argument("--trace", help="normalized webCAN CSV; required if raw ranges are absent")
     parser.add_argument("--candidate-limit", type=int, default=12)
     parser.add_argument("--limit", type=int, default=20, help="ordered hypotheses to emit")
     parser.add_argument("--out", default="temp-output/physical-hypotheses.json")
+    parser.add_argument(
+        "--opendbc-signals", type=Path,
+        help=(
+            "optional indexed signals.tsv for exact corpus precedent; takes "
+            f"precedence over {signals_env}"
+        ),
+    )
     args = parser.parse_args()
 
     candidates = load_candidates(Path(args.candidates))[:max(1, args.candidate_limit)]
     groups = group_by_id(load_trace(args.trace)) if args.trace else None
-    corpus_document, corpus_unavailable_reason = load_corpus_document()
+    corpus_document, corpus_unavailable_reason = load_corpus_document(args.opendbc_signals)
     hypotheses: list[dict[str, Any]] = []
     for candidate_index, candidate in enumerate(candidates, 1):
         stats = raw_stats(candidate, groups)

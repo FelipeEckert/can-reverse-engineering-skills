@@ -482,6 +482,15 @@ inside the skill.
    correlate → bitsearch → calibration/verification; never copy a reference-free proposal
    into a DBC as fact. Read `references/automotive-signal-priors.md` when using this stage.
 
+   **Optional opendbc setup is external and portable.** Build the read-only index with
+   `python scripts/opendbc_reference.py --corpus /path/to/opendbc-corpus \
+       --out-dir /path/to/opendbc-reference`, or set `CAN_RE_OPENDDBC_CORPUS` instead of
+   passing `--corpus`. Supply the resulting `signals.tsv` to physical hypotheses with
+   `--opendbc-signals /path/to/opendbc-reference/signals.tsv`, or set
+   `CAN_RE_OPENDDBC_SIGNALS`. CLI paths take precedence over their environment variables.
+   No configured index means precedent is reported unavailable and generation continues
+   normally; a configured index with no exact match is neutral evidence.
+
 7. **Build a single-signal DBC from bitsearch's winner** → deliverables folder.
    Use the geometry bitsearch found on the sweep run, but **fit scale/offset on the HOLDS
    run** (clean anchors) with `--ref-window`:

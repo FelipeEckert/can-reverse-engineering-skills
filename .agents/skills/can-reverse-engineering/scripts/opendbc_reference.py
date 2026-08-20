@@ -10,15 +10,15 @@ script retries with ``strict=False`` and finally uses a small, read-only parser
 for canonical BO_/SG_ declarations.  Every parser failure and every metadata
 ambiguity is retained in the generated audit artifacts.
 
-Default output (relative to the working-directory root):
+Output files (under the directory selected with ``--out-dir``):
 
-    temp-output/opendbc-reference/signals.tsv
-    temp-output/opendbc-reference/dbcs.tsv
-    temp-output/opendbc-reference/examples.tsv
-    temp-output/opendbc-reference/parse_failures.tsv
-    temp-output/opendbc-reference/metadata_ambiguities.tsv
-    temp-output/opendbc-reference/summary.json
-    temp-output/opendbc-reference/summary.md
+    signals.tsv
+    dbcs.tsv
+    examples.tsv
+    parse_failures.tsv
+    metadata_ambiguities.tsv
+    summary.json
+    summary.md
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import sys
 from collections import Counter, defaultdict, deque
@@ -35,8 +36,8 @@ from typing import Any, Iterable
 import cantools
 
 
-DEFAULT_CORPUS = Path("~/Data/CAN/opendbc-corpus").expanduser()
 DEFAULT_OUT = Path("temp-output/opendbc-reference")
+CORPUS_ENV = "CAN_RE_OPENDDBC_CORPUS"
 MANIFEST_FIELDS = (
     "dbc_filename",
     "original_source_path",
@@ -115,6 +116,18 @@ _PEDAL_RE = re.compile(
 
 def _clean_error(exc: BaseException | str) -> str:
     return " ".join(str(exc).replace("\t", " ").split())
+
+
+def resolve_corpus_path(explicit: Path | None) -> Path:
+    """Resolve the read-only corpus path from CLI, then environment."""
+
+    configured = explicit if explicit is not None else os.environ.get(CORPUS_ENV)
+    if not configured:
+        raise ValueError(
+            "opendbc corpus is not configured; pass --corpus /path/to/opendbc-corpus "
+            f"or set {CORPUS_ENV}"
+        )
+    return Path(configured).expanduser().resolve()
 
 
 def _format_number(value: Any) -> str:
@@ -801,26 +814,43 @@ BO_ 419385573 EXTENDED: 8 ECU
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  opendbc_reference.py --corpus /data/opendbc-corpus "
+            "--out-dir /data/opendbc-reference\n"
+            f"  {CORPUS_ENV}=/data/opendbc-corpus opendbc_reference.py "
+            "--out-dir /data/opendbc-reference"
+        ),
     )
     parser.add_argument(
         "--corpus",
         type=Path,
-        default=DEFAULT_CORPUS,
-        help=f"organized corpus containing manifest.tsv (default: {DEFAULT_CORPUS})",
+        help=(
+            "organized read-only corpus containing manifest.tsv; takes precedence "
+            f"over {CORPUS_ENV}"
+        ),
     )
     parser.add_argument(
         "--out-dir",
         type=Path,
         default=DEFAULT_OUT,
-        help=f"artifact directory, which must be outside the corpus (default: {DEFAULT_OUT})",
+        help=(
+            "artifact directory outside the corpus; may be a stable external path "
+            f"(default: {DEFAULT_OUT})"
+        ),
     )
     parser.add_argument("--selftest", action="store_true", help="run parser smoke tests and exit")
     args = parser.parse_args()
     if args.selftest:
         return _selftest()
 
-    corpus = args.corpus.expanduser().resolve()
+    try:
+        corpus = resolve_corpus_path(args.corpus)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     out_dir = args.out_dir.expanduser().resolve()
     try:
         out_dir.relative_to(corpus)
