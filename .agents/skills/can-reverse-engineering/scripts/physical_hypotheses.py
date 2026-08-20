@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Rank unconfirmed physical interpretations for discovered CAN fields.
+"""Enumerate unconfirmed physical interpretations for discovered CAN fields.
 
 This reference-free triage aid tests a small, documented set of automotive
-scale/offset priors. It never confirms a signal or calibrates a DBC.
+factor/offset proposals. It never confirms a signal or calibrates a DBC.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -28,18 +27,14 @@ else:
 
 
 DISCLAIMER = (
-    "HYPOTHESES ONLY: these rankings are reference-free priors, not signal "
+    "HYPOTHESES ONLY: these interpretations are reference-free proposals, not signal "
     "identifications. Confirm geometry and calibration against an independent "
     "physical reference before creating a DBC."
 )
-WEIGHTS = {
-    "physical_range": 0.30, "bit_width": 0.15, "update_rate": 0.15,
-    "dynamics": 0.20, "range_usage": 0.10, "common_encoding": 0.10,
-}
 
 CORPUS_INTERPRETATION = (
     "Exact opendbc corpus precedent is annotation only, not decoding confidence. "
-    "It does not affect heuristic scores, ranking, ordering, or filtering."
+    "It does not affect hypothesis ordering or filtering."
 )
 TORQUE_CORPUS_FAMILIES = (
     "torque.engine_torque", "torque.steering_torque", "torque.motor_torque",
@@ -56,77 +51,30 @@ CORPUS_FAMILY_MAP = {
     "high-voltage electrical": ("voltage.hv_pack",),
 }
 
-# Broad physical bounds avoid rejecting valid signals from short captures.
-# encoding is a fixed confidence in the convention itself, not in the signal ID.
-PRIORS = [
-    dict(name="engine speed", unit="rpm", scale=0.25, offset=0.0,
-         bounds=(0, 12000), widths=(16,), periods=(5, 100), motion="fast",
-         encoding=1.00, note="0.25 rpm/bit is a common 16-bit encoding"),
-    dict(name="engine speed", unit="rpm", scale=0.125, offset=0.0,
-         bounds=(0, 12000), widths=(16,), periods=(5, 100), motion="fast",
-         encoding=0.80, note="0.125 rpm/bit is a common binary-fraction encoding"),
-    dict(name="engine speed", unit="rpm", scale=1.0, offset=0.0,
-         bounds=(0, 12000), widths=(8, 16), periods=(5, 100), motion="fast",
-         encoding=0.70, note="integer rpm is simple but lower resolution"),
-    dict(name="percentage / pedal / throttle", unit="%", scale="full_scale", offset=0.0,
-         bounds=(0, 100), widths=(8, 10, 12, 16), periods=(5, 100), motion="control",
-         encoding=1.00, note="unsigned full-scale maps the complete code range to 0..100%"),
-    dict(name="percentage / pedal / throttle", unit="%", scale=0.4, offset=0.0,
-         bounds=(0, 100), widths=(8,), periods=(5, 100), motion="control",
-         encoding=0.95, note="0.4%/bit is a common 8-bit automotive convention"),
-    dict(name="percentage / pedal / throttle", unit="%", scale=1.0, offset=0.0,
-         bounds=(0, 100), widths=(8,), periods=(5, 100), motion="control",
-         encoding=0.75, note="integer percent is a common simple encoding"),
-    dict(name="temperature", unit="degC", scale=1.0, offset=-40.0,
-         bounds=(-60, 300), widths=(8,), periods=(50, 2000), motion="slow",
-         encoding=1.00, note="raw-40 degC is a common 8-bit temperature encoding"),
-    dict(name="temperature", unit="degC", scale=0.1, offset=-40.0,
-         bounds=(-60, 300), widths=(16,), periods=(20, 2000), motion="slow",
-         encoding=0.85, note="0.1 degC/bit with a -40 offset is a common fine encoding"),
-    dict(name="vehicle or wheel speed", unit="km/h", scale=1 / 256, offset=0.0,
-         bounds=(0, 350), widths=(16,), periods=(5, 100), motion="fast",
-         encoding=1.00, note="1/256 km/h is a common 16-bit wheel-speed convention"),
-    dict(name="vehicle or wheel speed", unit="km/h", scale=1 / 64, offset=0.0,
-         bounds=(0, 350), widths=(16,), periods=(5, 100), motion="fast",
-         encoding=0.95, note="1/64 km/h is a common binary-fraction speed encoding"),
-    dict(name="vehicle or wheel speed", unit="km/h", scale=0.01, offset=0.0,
-         bounds=(0, 350), widths=(16,), periods=(5, 100), motion="fast",
-         encoding=0.90, note="0.01 km/h/bit is a common decimal speed encoding"),
-    dict(name="vehicle or wheel speed", unit="km/h", scale=0.1, offset=0.0,
-         bounds=(0, 350), widths=(8, 16), periods=(5, 100), motion="fast",
-         encoding=0.85, note="0.1 km/h/bit is a common decimal speed encoding"),
-    dict(name="pressure", unit="kPa", scale=1.0, offset=0.0,
-         bounds=(0, 3000), widths=(8, 16), periods=(5, 200), motion="moderate",
-         encoding=0.90, note="integer kPa is a common pressure encoding"),
-    dict(name="pressure", unit="kPa", scale=2.0, offset=0.0,
-         bounds=(0, 3000), widths=(8, 16), periods=(5, 200), motion="moderate",
-         encoding=1.00, note="2 kPa/bit is a common boost-pressure convention"),
-    dict(name="pressure", unit="bar", scale=0.1, offset=0.0,
-         bounds=(0, 30), widths=(8, 16), periods=(5, 200), motion="moderate",
-         encoding=0.80, note="0.1 bar/bit is a common compact pressure encoding"),
-    dict(name="torque", unit="Nm", scale=0.1, offset="centered",
-         bounds=(-1500, 1500), widths=(16,), periods=(5, 100), motion="fast",
-         encoding=0.85, note="0.1 Nm/bit with an unsigned midpoint bias allows signed torque"),
-    dict(name="torque", unit="Nm", scale=1.0, offset="centered",
-         bounds=(-1500, 1500), widths=(12, 16), periods=(5, 100), motion="fast",
-         encoding=0.75, note="integer Nm with an unsigned midpoint bias allows signed torque"),
-    dict(name="torque percentage", unit="%", scale=1.0, offset=-125.0,
-         bounds=(-125, 125), widths=(8,), periods=(5, 100), motion="fast",
-         encoding=1.00, note="raw-125% is a common engine-torque convention"),
-    dict(name="low-voltage electrical", unit="V", scale=0.05, offset=0.0,
-         bounds=(0, 60), widths=(8, 16), periods=(10, 1000), motion="slow",
-         encoding=1.00, note="0.05 V/bit is a common battery-potential convention"),
-    dict(name="low-voltage electrical", unit="V", scale=0.01, offset=0.0,
-         bounds=(0, 60), widths=(12, 16), periods=(10, 1000), motion="slow",
-         encoding=0.90, note="0.01 V/bit is a common fine low-voltage encoding"),
-    dict(name="high-voltage electrical", unit="V", scale=0.1, offset=0.0,
-         bounds=(0, 1000), widths=(12, 16), periods=(10, 1000), motion="moderate",
-         encoding=0.90, note="0.1 V/bit is a common high-voltage encoding"),
+# Stable generation order. These are encodings to inspect, not ranked beliefs.
+HYPOTHESIS_ENCODINGS = [
+    dict(name="engine speed", unit="rpm", factor=0.25, offset=0.0),
+    dict(name="engine speed", unit="rpm", factor=0.125, offset=0.0),
+    dict(name="engine speed", unit="rpm", factor=1.0, offset=0.0),
+    dict(name="percentage / pedal / throttle", unit="%", factor="full_scale", offset=0.0),
+    dict(name="percentage / pedal / throttle", unit="%", factor=0.4, offset=0.0),
+    dict(name="percentage / pedal / throttle", unit="%", factor=1.0, offset=0.0),
+    dict(name="temperature", unit="degC", factor=1.0, offset=-40.0),
+    dict(name="temperature", unit="degC", factor=0.1, offset=-40.0),
+    dict(name="vehicle or wheel speed", unit="km/h", factor=1 / 256, offset=0.0),
+    dict(name="vehicle or wheel speed", unit="km/h", factor=1 / 64, offset=0.0),
+    dict(name="vehicle or wheel speed", unit="km/h", factor=0.01, offset=0.0),
+    dict(name="vehicle or wheel speed", unit="km/h", factor=0.1, offset=0.0),
+    dict(name="pressure", unit="kPa", factor=1.0, offset=0.0),
+    dict(name="pressure", unit="kPa", factor=2.0, offset=0.0),
+    dict(name="pressure", unit="bar", factor=0.1, offset=0.0),
+    dict(name="torque", unit="Nm", factor=0.1, offset="centered"),
+    dict(name="torque", unit="Nm", factor=1.0, offset="centered"),
+    dict(name="torque percentage", unit="%", factor=1.0, offset=-125.0),
+    dict(name="low-voltage electrical", unit="V", factor=0.05, offset=0.0),
+    dict(name="low-voltage electrical", unit="V", factor=0.01, offset=0.0),
+    dict(name="high-voltage electrical", unit="V", factor=0.1, offset=0.0),
 ]
-
-
-def clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
 
 
 def parse_can_id(value: Any) -> int:
@@ -177,87 +125,45 @@ def raw_stats(candidate: dict[str, Any], groups: dict[int, Any] | None) -> dict[
     }
 
 
-def width_score(length: int, preferred: tuple[int, ...]) -> float:
-    return clamp01(math.exp(-min(abs(length - width) for width in preferred) / 4.0))
+OBSERVED_BEHAVIOR_FIELDS = (
+    "ac1", "wrap_rate", "jump_rate", "change_rate", "delta_entropy_norm", "distinct",
+)
 
 
-def period_score(period_ms: float, bounds: tuple[float, float]) -> float:
-    low, high = bounds
-    if low <= period_ms <= high:
-        return 1.0
-    nearest = low if period_ms < low else high
-    return clamp01(math.exp(-abs(math.log2(max(period_ms, 0.001) / nearest))))
+def observed_behavior(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Return measured profiler properties without carrying its scalar rank score."""
+
+    return {key: candidate[key] for key in OBSERVED_BEHAVIOR_FIELDS if key in candidate}
 
 
-def physical_range_score(qlo: float, qhi: float, bounds: tuple[float, float]) -> float:
-    low, high = bounds
-    width = high - low
-    outside = max(0.0, low - qlo) + max(0.0, qhi - high)
-    inside = math.exp(-5.0 * outside / max(width, 1e-9))
-    span = clamp01(0.35 + 0.65 * max(0.0, qhi - qlo) / max(0.10 * width, 1e-9))
-    return clamp01(inside * span)
+def factor_offset(encoding: dict[str, Any], length: int, signed: bool) -> tuple[float, float]:
+    factor = (
+        100.0 / ((1 << length) - 1)
+        if encoding["factor"] == "full_scale"
+        else float(encoding["factor"])
+    )
+    offset = (
+        0.0 if signed else -factor * float(1 << (length - 1))
+    ) if encoding["offset"] == "centered" else float(encoding["offset"])
+    return factor, offset
 
 
-def dynamics_score(candidate: dict[str, Any], motion: str) -> float:
-    plaus = clamp01(float(candidate.get("plausibility", candidate.get("score", 0.5))))
-    ac1 = clamp01((float(candidate.get("ac1", 0.0)) + 1.0) / 2.0)
-    jump = clamp01(1.0 - float(candidate.get("jump_rate", 0.0)))
-    structure = clamp01(1.0 - float(candidate.get("delta_entropy_norm", 0.5)))
-    change = clamp01(float(candidate.get("change_rate", 0.0)))
-    if motion == "slow":
-        activity = 1.0 if change <= 0.30 else clamp01(1.0 - (change - 0.30) / 0.70)
-    elif motion == "control":
-        activity = clamp01(0.55 + min(change, 0.45))
-    elif motion == "fast":
-        activity = clamp01(0.50 + min(change, 0.50))
-    else:
-        activity = clamp01(0.65 + min(change, 0.35))
-    return 0.30 * plaus + 0.25 * ac1 + 0.20 * jump + 0.15 * structure + 0.10 * activity
-
-
-def usage_score(stats: dict[str, float], length: int) -> tuple[float, float]:
-    usage = clamp01((stats["raw_q99"] - stats["raw_q01"]) / max(float((1 << length) - 1), 1.0))
-    coverage = clamp01((math.log10(max(usage, 1e-8)) + 5.0) / 3.0)
-    saturation = clamp01(1.0 - stats["raw_edge_fraction"] / 0.50)
-    return 0.70 * coverage + 0.30 * saturation, usage
-
-
-def scale_offset(prior: dict[str, Any], length: int, signed: bool) -> tuple[float, float]:
-    scale = 100.0 / ((1 << length) - 1) if prior["scale"] == "full_scale" else float(prior["scale"])
-    offset = (0.0 if signed else -scale * float(1 << (length - 1))) if prior["offset"] == "centered" else float(prior["offset"])
-    return scale, offset
-
-
-def score_hypothesis(candidate: dict[str, Any], stats: dict[str, float], prior: dict[str, Any]) -> dict[str, Any]:
+def build_hypothesis(
+    candidate: dict[str, Any], stats: dict[str, float], encoding: dict[str, Any]
+) -> dict[str, Any]:
     length, signed = int(candidate["length_bits"]), bool(candidate.get("signed", False))
-    period_ms = float(candidate.get("period_ms", 0.0))
-    scale, offset = scale_offset(prior, length, signed)
-    qlo, qhi = sorted((offset + scale * stats["raw_q01"], offset + scale * stats["raw_q99"]))
-    use_score, usage = usage_score(stats, length)
-    parts = {
-        "physical_range": physical_range_score(qlo, qhi, prior["bounds"]),
-        "bit_width": width_score(length, prior["widths"]),
-        "update_rate": period_score(period_ms, prior["periods"]),
-        "dynamics": dynamics_score(candidate, prior["motion"]),
-        "range_usage": use_score, "common_encoding": float(prior["encoding"]),
-    }
-    score = 100.0 * sum(WEIGHTS[key] * parts[key] for key in WEIGHTS)
-    reasoning = (
-        f"range {parts['physical_range']:.2f}: observed {qlo:.4g}..{qhi:.4g} {prior['unit']} "
-        f"vs broad {prior['bounds'][0]}..{prior['bounds'][1]}; "
-        f"width {parts['bit_width']:.2f}: {length}b vs preferred {list(prior['widths'])}; "
-        f"rate {parts['update_rate']:.2f}: {period_ms:g} ms vs {prior['periods'][0]}..{prior['periods'][1]}; "
-        f"dynamics {parts['dynamics']:.2f}: plaus={float(candidate.get('plausibility', 0.5)):.2f}, "
-        f"ac1={float(candidate.get('ac1', 0.0)):.2f}, change={float(candidate.get('change_rate', 0.0)):.1%}; "
-        f"usage {parts['range_usage']:.2f}: {usage:.3%} of raw codes, edge={stats['raw_edge_fraction']:.1%}; "
-        f"encoding {parts['common_encoding']:.2f}: {prior['note']}"
+    factor, offset = factor_offset(encoding, length, signed)
+    qlo, qhi = sorted(
+        (offset + factor * stats["raw_q01"], offset + factor * stats["raw_q99"])
     )
     return {
-        "label": "HYPOTHESIS", "hypothesis": prior["name"], "unit": prior["unit"],
-        "scale": scale, "offset": offset, "score": round(score, 4),
-        "observed_physical_q01": qlo, "observed_physical_q99": qhi,
-        "score_breakdown": {key: round(value, 4) for key, value in parts.items()},
-        "reasoning": reasoning,
+        "label": "HYPOTHESIS",
+        "hypothesis": encoding["name"],
+        "unit": encoding["unit"],
+        "factor": factor,
+        "offset": offset,
+        "decoded_physical_q01": qlo,
+        "decoded_physical_q99": qhi,
     }
 
 
@@ -309,7 +215,7 @@ def corpus_precedent(
                 family=family,
                 bit_length=int(candidate["length_bits"]),
                 signedness="signed" if candidate["signed"] else "unsigned",
-                factor=str(hypothesis["scale"]),
+                factor=str(hypothesis["factor"]),
                 offset=str(hypothesis["offset"]),
                 unit=str(hypothesis["unit"]) if hypothesis.get("unit") else None,
             )
@@ -367,77 +273,88 @@ def main() -> None:
     parser.add_argument("--candidates", required=True, help="candidate JSON with field metadata")
     parser.add_argument("--trace", help="normalized webCAN CSV; required if raw ranges are absent")
     parser.add_argument("--candidate-limit", type=int, default=12)
-    parser.add_argument("--top", type=int, default=20, help="global hypotheses to keep")
+    parser.add_argument("--limit", type=int, default=20, help="ordered hypotheses to emit")
     parser.add_argument("--out", default="temp-output/physical-hypotheses.json")
     args = parser.parse_args()
 
     candidates = load_candidates(Path(args.candidates))[:max(1, args.candidate_limit)]
     groups = group_by_id(load_trace(args.trace)) if args.trace else None
     corpus_document, corpus_unavailable_reason = load_corpus_document()
-    ranked: list[dict[str, Any]] = []
-    for candidate in candidates:
+    hypotheses: list[dict[str, Any]] = []
+    for candidate_index, candidate in enumerate(candidates, 1):
         stats = raw_stats(candidate, groups)
         can_id = parse_can_id(candidate.get("id", candidate.get("id_hex")))
         identity = {
+            "upstream_candidate_order": candidate_index,
             "id_hex": candidate.get("id_hex") or f"0x{can_id:X}",
             "field": candidate.get("field", "unnamed field"),
             "order": candidate.get("order", "little"),
             "start_bit": int(candidate["start_bit"]), "length_bits": int(candidate["length_bits"]),
             "signed": bool(candidate.get("signed", False)),
-            "period_ms": float(candidate.get("period_ms", 0.0)), **stats,
+            "period_ms": float(candidate.get("period_ms", 0.0)),
+            "observed_behavior": observed_behavior(candidate),
+            **stats,
         }
-        for prior in PRIORS:
-            hypothesis = score_hypothesis(candidate, stats, prior)
+        for encoding in HYPOTHESIS_ENCODINGS:
+            hypothesis = build_hypothesis(candidate, stats, encoding)
             hypothesis["corpus_precedent"] = corpus_precedent(
                 hypothesis, identity, corpus_document, corpus_unavailable_reason
             )
-            ranked.append({"candidate": identity, **hypothesis})
+            hypotheses.append({"candidate": identity, **hypothesis})
 
-    ranked.sort(key=lambda row: (
-        -row["score"], row["candidate"]["id_hex"], row["candidate"]["start_bit"],
-        row["candidate"]["length_bits"], row["hypothesis"], row["scale"], row["offset"],
-    ))
-    ranked = ranked[:max(1, args.top)]
-    for index, row in enumerate(ranked, 1):
-        row["rank"] = index
+    hypotheses = hypotheses[:max(1, args.limit)]
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "label": "HYPOTHESES ONLY", "disclaimer": DISCLAIMER,
-        "method": "deterministic weighted automotive priors", "weights": WEIGHTS,
+        "method": "deterministic enumeration of automotive encoding hypotheses",
+        "ordering": (
+            "upstream candidate input order, then stable hypothesis generation order; "
+            "no semantic or opendbc-based ranking"
+        ),
         "corpus_precedent": {
             "available": corpus_document is not None,
             "interpretation": CORPUS_INTERPRETATION,
             "unavailable_reason": corpus_unavailable_reason,
         },
-        "candidates_considered": len(candidates), "ranked_hypotheses": ranked,
+        "candidates_considered": len(candidates),
+        "hypotheses_emitted": len(hypotheses),
+        "physical_hypotheses": hypotheses,
     }, indent=2) + "\n")
     csv_out = out.with_suffix(".csv")
     columns = [
-        "rank", "id_hex", "field", "start_bit", "length_bits", "order", "signed",
-        "period_ms", "raw_min", "raw_max", "hypothesis", "unit", "scale", "offset",
-        "score", "observed_physical_q01", "observed_physical_q99", "reasoning",
-        "corpus_precedent",
+        "upstream_candidate_order", "id_hex", "field", "start_bit", "length_bits", "order", "signed",
+        "period_ms", "raw_min", "raw_max", "hypothesis", "unit", "factor", "offset",
+        "decoded_physical_q01", "decoded_physical_q99", "observed_behavior", "corpus_precedent",
     ]
     with csv_out.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
-        for row in ranked:
+        for row in hypotheses:
             csv_row = {key: row["candidate"].get(key, row.get(key)) for key in columns}
+            csv_row["observed_behavior"] = json.dumps(
+                row["candidate"]["observed_behavior"], sort_keys=True, separators=(",", ":")
+            )
             csv_row["corpus_precedent"] = json.dumps(
                 row["corpus_precedent"], sort_keys=True, separators=(",", ":")
             )
             writer.writerow(csv_row)
 
     print(DISCLAIMER)
-    print(f"Scored {len(candidates)} candidate fields with fixed weights: {WEIGHTS}")
-    for row in ranked[:min(10, len(ranked))]:
+    print(
+        f"Enumerated {len(hypotheses)} hypotheses in upstream candidate order "
+        "and stable generation order."
+    )
+    for row in hypotheses[:min(10, len(hypotheses))]:
         c = row["candidate"]
-        print(f"#{row['rank']:2d} HYPOTHESIS {c['id_hex']} {c['field']} -> {row['hypothesis']} "
-              f"[{row['score']:.1f}/100], scale={row['scale']:.8g}, "
-              f"offset={row['offset']:.8g} {row['unit']}")
-        print(f"    {row['reasoning']}")
+        print(
+            f"HYPOTHESIS candidate {c['upstream_candidate_order']}: "
+            f"{c['id_hex']} {c['field']} -> {row['hypothesis']}, "
+            f"factor={row['factor']:.8g}, offset={row['offset']:.8g} {row['unit']}, "
+            f"decoded q01..q99={row['decoded_physical_q01']:.4g}.."
+            f"{row['decoded_physical_q99']:.4g}"
+        )
         print(f"    corpus precedent: {corpus_console_summary(row['corpus_precedent'])}")
     print(f"Wrote {out}")
     print(f"Wrote {csv_out}")

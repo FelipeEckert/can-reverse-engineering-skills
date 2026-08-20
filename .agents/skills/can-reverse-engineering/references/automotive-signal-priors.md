@@ -1,43 +1,40 @@
 # Automotive physical-signal priors
 
 Use this reference only for the optional, reference-free physical-hypothesis
-stage. These priors rank interpretations worth testing; they do not identify a
-signal. A matching range or familiar scale is weak evidence without an
+stage. These priors enumerate interpretations worth testing; they do not identify
+a signal. A matching range or familiar factor is weak evidence without an
 independent physical reference.
 
 ## Inputs and output
 
 `physical_hypotheses.py` consumes discovered field metadata plus raw-range and
-dynamics metadata. Candidate JSON should provide CAN ID, start bit, bit length,
-byte order, signedness when known, update period, and the survey/candidate
-smoothness metrics. It may also provide `raw_min`, `raw_max`, `raw_q01`,
+observed-behavior metadata. Candidate JSON should provide CAN ID, start bit, bit
+length, byte order, signedness when known, update period, and available observed
+behavior metrics. It may also provide `raw_min`, `raw_max`, `raw_q01`,
 `raw_q99`, and `raw_edge_fraction`. If raw statistics are absent, pass the
 normalized trace and the script extracts them without modifying the trace.
 
-Every result is labelled `HYPOTHESIS`. Treat the output as a way to choose the
-next experiment or reference, never as permission to name a DBC signal.
+Every result is labelled `HYPOTHESIS` and reports candidate geometry, proposed
+signal family, factor/offset, decoded percentile range, concise observed behavior,
+and exact opendbc precedent when available. Treat the output as a way to choose
+the next experiment or reference, never as permission to name a DBC signal.
 
-## Deterministic score
+## Evaluation and deterministic ordering
 
-The total score is a fixed weighted sum on a 0–100 scale:
+There is no physical-hypothesis score or semantic ranking. The script preserves:
 
-| Component | Weight | Evidence |
-|---|---:|---|
-| Physical range | 30% | Observed 1st–99th percentile after scale/offset vs a broad physical domain |
-| Bit width | 15% | Distance from widths commonly used for that quantity |
-| Update rate | 15% | Message period vs a broad quantity-specific period band |
-| Smoothness/dynamics | 20% | Candidate plausibility, lag-1 autocorrelation, jump rate, delta structure, and activity |
-| Saturation/range usage | 10% | Fraction of available raw codes exercised plus time at the field extrema |
-| Common encoding | 10% | Fixed prior for how conventional the tested scale/offset is |
+1. The upstream candidate profiler's order.
+2. The declared hypothesis-generation order within each candidate.
 
-All component values, weights, observed ranges, and a one-line explanation are
-written to JSON. Ties use stable candidate geometry and hypothesis keys, so the
-same inputs produce the same ranking.
+Neither opendbc support nor any other semantic evidence changes that order or
+filters the output. The agent evaluates each interpretation from separate evidence:
+observed CAN behavior, physical plausibility of the decoded values, exact corpus
+precedent, and independent reference agreement. These dimensions are not collapsed
+into a scalar confidence value.
 
-The physical bounds are intentionally broad. Short captures often exercise only
-a small part of a valid signal, while composite or over-wide fields tend to use a
-tiny fraction of their available codes. Neither fact alone proves or disproves an
-interpretation.
+Short captures often exercise only a small part of a valid signal, while composite
+or over-wide fields may use a tiny fraction of their available codes. Neither fact
+alone proves or disproves an interpretation.
 
 ## Tested conventions
 
@@ -50,8 +47,9 @@ interpretation.
 - Torque: 0.1 or 1 Nm/bit with a midpoint bias, plus raw minus 125 percent.
 - Voltage: 0.05 or 0.01 V/bit for low voltage and 0.1 V/bit for high voltage.
 
-These are common conventions, not an exhaustive catalog. Do not add
-manufacturer-specific databases or `opendbc` evidence at this stage.
+These are common conventions, not an exhaustive catalog. Exact opendbc evidence is
+reported only through the read-only prior lookup as corpus precedent, not decoding
+confidence.
 
 ## Use in the workflow
 
@@ -65,7 +63,7 @@ analysis or identified by bitsearch, and before reference-based calibration:
   --out temp-output/physical-hypotheses.json
 ```
 
-Use the ranking to request a discriminating excitation or physical reference.
+Use the hypotheses to request a discriminating excitation or physical reference.
 Then return to correlate/bitsearch as needed and calibrate only against that
-reference. Do not copy a hypothesis scale or offset into a DBC merely because it
-ranked highly.
+reference. Do not copy a proposed factor or offset into a DBC merely because it
+has corpus precedent or looks physically plausible.
