@@ -454,20 +454,33 @@ inside the skill.
    correct field can't false-FAIL on kept sentinels) while still drawing them on the
    plot. Don't silently keep them — drop-and-report (high) or ask (med/low).
 
-6b. **Optional: enumerate physical hypotheses (after field discovery, before calibration).**
-   Run this only when the user asks for reference-free semantic hypotheses:
-   `python scripts/physical_hypotheses.py --candidates <candidate.json> \
-       --trace <normalized.csv> --out temp-output/physical-hypotheses.json`
-   It enumerates common automotive factor/offset interpretations in upstream candidate
-   order and stable hypothesis-generation order. Every result is an unconfirmed
-   **HYPOTHESIS** with factual geometry, observed behavior, decoded range, and optional
-   exact opendbc precedent; there is no numeric semantic score or semantic ranking.
-   Evaluate interpretations from the observed CAN behavior, physical plausibility,
-   corpus precedent, and independent reference evidence. Corpus precedent remains an
-   annotation and never changes ordering or filters hypotheses. This stage never replaces
-   reference-backed correlate/bitsearch/calibration and its output must not be copied into
-   a DBC as fact. Read `references/automotive-signal-priors.md` when using this stage. The
-   trace is needed only when candidate JSON lacks raw-range statistics.
+6b. **Optional: reference-free candidate profiler → physical hypotheses.**
+   Use this branch after survey when no external reference is available yet. If the input
+   is SavvyCAN/GVRET CSV, normalize it first with `import_savvycan.py` as described in the
+   Offline workflow; never overwrite the original. Then run the reproducible bridge:
+   `python scripts/survey.py --trace <normalized.csv> \
+       --json temp-output/survey_<label>.json`
+   `python scripts/candidate_profiler.py --trace <normalized.csv> \
+       --survey temp-output/survey_<label>.json \
+       --out temp-output/candidate-analysis/candidate-ranking.json`
+   `python scripts/physical_hypotheses.py \
+       --candidates temp-output/candidate-analysis/candidate-ranking.json \
+       --out temp-output/physical-hypotheses.json`
+   The profiler uses only observed CAN behavior and field geometry. It excludes
+   survey-marked counter overlaps and near-certain per-frame counters, retains
+   checksum-like fields last, and orders candidates with a documented lexicographic
+   investigation heuristic; it does not infer a signal
+   family, physical scale/offset, or decoding confidence. Its JSON includes raw-range
+   statistics, so `physical_hypotheses.py` consumes it directly without `--trace`.
+   `physical_hypotheses.py` then enumerates common automotive factor/offset interpretations
+   in profiler order and stable hypothesis-generation order. Every result is an
+   unconfirmed **HYPOTHESIS** with factual geometry, observed behavior, decoded range, and
+   optional exact opendbc precedent. Opendbc is optional annotation only: absence of the
+   corpus or of an exact match does not affect candidate order or count. Evaluate
+   interpretations from observed behavior, physical plausibility, corpus precedent, and
+   independent reference evidence. When a reference becomes available, return to
+   correlate → bitsearch → calibration/verification; never copy a reference-free proposal
+   into a DBC as fact. Read `references/automotive-signal-priors.md` when using this stage.
 
 7. **Build a single-signal DBC from bitsearch's winner** → deliverables folder.
    Use the geometry bitsearch found on the sweep run, but **fit scale/offset on the HOLDS
