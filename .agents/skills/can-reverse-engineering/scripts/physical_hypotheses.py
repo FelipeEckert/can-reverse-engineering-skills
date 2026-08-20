@@ -18,6 +18,14 @@ import numpy as np
 
 from common import apply_sign, extract_be, extract_le, group_by_id, load_trace
 
+try:
+    import opendbc_prior_lookup
+except Exception as exc:  # Optional annotation must never block hypothesis generation.
+    opendbc_prior_lookup = None
+    OPENDBC_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+else:
+    OPENDBC_IMPORT_ERROR = None
+
 
 DISCLAIMER = (
     "HYPOTHESES ONLY: these rankings are reference-free priors, not signal "
@@ -27,6 +35,25 @@ DISCLAIMER = (
 WEIGHTS = {
     "physical_range": 0.30, "bit_width": 0.15, "update_rate": 0.15,
     "dynamics": 0.20, "range_usage": 0.10, "common_encoding": 0.10,
+}
+
+CORPUS_INTERPRETATION = (
+    "Exact opendbc corpus precedent is annotation only, not decoding confidence. "
+    "It does not affect heuristic scores, ranking, ordering, or filtering."
+)
+TORQUE_CORPUS_FAMILIES = (
+    "torque.engine_torque", "torque.steering_torque", "torque.motor_torque",
+    "torque.driveline_wheel_torque", "torque.request_command", "torque.limit",
+)
+CORPUS_FAMILY_MAP = {
+    "engine speed": ("engine_rpm",),
+    "percentage / pedal / throttle": ("pedal_throttle",),
+    "temperature": ("temperature",),
+    "vehicle or wheel speed": ("vehicle_speed", "wheel_speed"),
+    "torque": TORQUE_CORPUS_FAMILIES,
+    "torque percentage": TORQUE_CORPUS_FAMILIES,
+    "low-voltage electrical": ("voltage.low_voltage_system",),
+    "high-voltage electrical": ("voltage.hv_pack",),
 }
 
 # Broad physical bounds avoid rejecting valid signals from short captures.
@@ -234,6 +261,107 @@ def score_hypothesis(candidate: dict[str, Any], stats: dict[str, float], prior: 
     }
 
 
+def load_corpus_document() -> tuple[dict[str, object] | None, str | None]:
+    """Load optional corpus evidence through the lookup layer, failing open."""
+
+    if opendbc_prior_lookup is None:
+        return None, f"lookup layer unavailable: {OPENDBC_IMPORT_ERROR}"
+    try:
+        signals_path = opendbc_prior_lookup.priors.DEFAULT_SIGNALS
+        if not signals_path.is_file():
+            raise FileNotFoundError(f"indexed corpus not found: {signals_path}")
+        return opendbc_prior_lookup.load_prior_document(signals_path), None
+    except Exception as exc:  # Annotation failures must not alter normal generation.
+        return None, f"corpus precedent unavailable: {type(exc).__name__}: {exc}"
+
+
+def corpus_precedent(
+    hypothesis: dict[str, Any],
+    candidate: dict[str, Any],
+    document: dict[str, object] | None,
+    unavailable_reason: str | None,
+) -> dict[str, Any]:
+    """Annotate one hypothesis with exact family-specific corpus precedent."""
+
+    annotation: dict[str, Any] = {
+        "available": document is not None,
+        "exact_match": None,
+        "interpretation": CORPUS_INTERPRETATION,
+        "family_results": [],
+    }
+    if document is None:
+        annotation["unavailable_reason"] = unavailable_reason or "corpus precedent unavailable"
+        return annotation
+
+    families = CORPUS_FAMILY_MAP.get(str(hypothesis["hypothesis"]))
+    if not families:
+        annotation["available"] = False
+        annotation["unavailable_reason"] = (
+            f"no exact opendbc prior family for {hypothesis['hypothesis']!r}"
+        )
+        return annotation
+
+    family_results = []
+    try:
+        for family in families:
+            result = opendbc_prior_lookup.lookup_exact(
+                document,
+                family=family,
+                bit_length=int(candidate["length_bits"]),
+                signedness="signed" if candidate["signed"] else "unsigned",
+                factor=str(hypothesis["scale"]),
+                offset=str(hypothesis["offset"]),
+                unit=str(hypothesis["unit"]) if hypothesis.get("unit") else None,
+            )
+            match = result["matches"][0] if result["matches"] else None
+            family_results.append({
+                "signal_family": family,
+                "exact_match": bool(match),
+                "qualitative_corpus_support": (
+                    match["qualitative_corpus_support"] if match else None
+                ),
+                "independent_oem_family_count": (
+                    match["independent_oem_family_count"] if match else 0
+                ),
+                "independent_oem_families": (
+                    match["independent_oem_families"] if match else []
+                ),
+                "parser_provenance": (
+                    match["parser_counts"]
+                    if match else {"strict": 0, "lenient": 0, "fallback": 0}
+                ),
+                "matched_normalized_encoding_pattern": (
+                    match["matched_normalized_encoding_pattern"] if match else None
+                ),
+            })
+    except Exception as exc:
+        annotation["available"] = False
+        annotation["unavailable_reason"] = (
+            f"exact lookup unavailable: {type(exc).__name__}: {exc}"
+        )
+        return annotation
+    annotation["family_results"] = family_results
+    annotation["exact_match"] = any(result["exact_match"] for result in family_results)
+    return annotation
+
+
+def corpus_console_summary(annotation: dict[str, Any]) -> str:
+    if not annotation["available"]:
+        return f"unavailable ({annotation['unavailable_reason']})"
+    summaries = []
+    for result in annotation["family_results"]:
+        if result["exact_match"]:
+            provenance = result["parser_provenance"]
+            summaries.append(
+                f"{result['signal_family']}: exact=yes, support={result['qualitative_corpus_support']}, "
+                f"independent OEM/families={result['independent_oem_family_count']}, "
+                f"strict/lenient/fallback={provenance['strict']}/{provenance['lenient']}/{provenance['fallback']}"
+            )
+        else:
+            summaries.append(f"{result['signal_family']}: exact=no")
+    return "; ".join(summaries)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidates", required=True, help="candidate JSON with field metadata")
@@ -245,6 +373,7 @@ def main() -> None:
 
     candidates = load_candidates(Path(args.candidates))[:max(1, args.candidate_limit)]
     groups = group_by_id(load_trace(args.trace)) if args.trace else None
+    corpus_document, corpus_unavailable_reason = load_corpus_document()
     ranked: list[dict[str, Any]] = []
     for candidate in candidates:
         stats = raw_stats(candidate, groups)
@@ -258,7 +387,11 @@ def main() -> None:
             "period_ms": float(candidate.get("period_ms", 0.0)), **stats,
         }
         for prior in PRIORS:
-            ranked.append({"candidate": identity, **score_hypothesis(candidate, stats, prior)})
+            hypothesis = score_hypothesis(candidate, stats, prior)
+            hypothesis["corpus_precedent"] = corpus_precedent(
+                hypothesis, identity, corpus_document, corpus_unavailable_reason
+            )
+            ranked.append({"candidate": identity, **hypothesis})
 
     ranked.sort(key=lambda row: (
         -row["score"], row["candidate"]["id_hex"], row["candidate"]["start_bit"],
@@ -273,6 +406,11 @@ def main() -> None:
     out.write_text(json.dumps({
         "label": "HYPOTHESES ONLY", "disclaimer": DISCLAIMER,
         "method": "deterministic weighted automotive priors", "weights": WEIGHTS,
+        "corpus_precedent": {
+            "available": corpus_document is not None,
+            "interpretation": CORPUS_INTERPRETATION,
+            "unavailable_reason": corpus_unavailable_reason,
+        },
         "candidates_considered": len(candidates), "ranked_hypotheses": ranked,
     }, indent=2) + "\n")
     csv_out = out.with_suffix(".csv")
@@ -280,12 +418,17 @@ def main() -> None:
         "rank", "id_hex", "field", "start_bit", "length_bits", "order", "signed",
         "period_ms", "raw_min", "raw_max", "hypothesis", "unit", "scale", "offset",
         "score", "observed_physical_q01", "observed_physical_q99", "reasoning",
+        "corpus_precedent",
     ]
     with csv_out.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         for row in ranked:
-            writer.writerow({key: row["candidate"].get(key, row.get(key)) for key in columns})
+            csv_row = {key: row["candidate"].get(key, row.get(key)) for key in columns}
+            csv_row["corpus_precedent"] = json.dumps(
+                row["corpus_precedent"], sort_keys=True, separators=(",", ":")
+            )
+            writer.writerow(csv_row)
 
     print(DISCLAIMER)
     print(f"Scored {len(candidates)} candidate fields with fixed weights: {WEIGHTS}")
@@ -295,6 +438,7 @@ def main() -> None:
               f"[{row['score']:.1f}/100], scale={row['scale']:.8g}, "
               f"offset={row['offset']:.8g} {row['unit']}")
         print(f"    {row['reasoning']}")
+        print(f"    corpus precedent: {corpus_console_summary(row['corpus_precedent'])}")
     print(f"Wrote {out}")
     print(f"Wrote {csv_out}")
 
