@@ -38,7 +38,7 @@ Combine every confirmed signal for an application (auto-scans `*/*.dbc`, one
 folder level down, which excludes the combined file itself):
 
 ```
-python scripts/combine_dbc.py --app sensor-to-can
+python .agents/skills/combine-dbc/scripts/combine_dbc.py --app sensor-to-can
 # -> decoding-output/sensor-to-can/sensor-to-can.dbc
 ```
 
