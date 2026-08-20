@@ -10,12 +10,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from common import apply_sign, extract_be, extract_le, group_by_id, load_trace
+from trace_validation import TraceValidationError
 
 try:
     import opendbc_prior_lookup
@@ -382,4 +384,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except TraceValidationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None

@@ -22,6 +22,11 @@ from scipy import stats
 
 import can
 import cantools
+from trace_validation import (
+    NORMALIZED_COLUMNS,
+    TraceValidationError,
+    validate_normalized_trace,
+)
 
 
 def _register_cansub() -> None:
@@ -268,35 +273,33 @@ def summarize_health(status: dict, profile: str | None = None) -> tuple[bool, li
 # Trace loading (webCAN CSV)
 # ---------------------------------------------------------------------------
 
-WEBCAN_COLUMNS = [
-    "TimestampEpoch", "BusChannel", "ID", "IDE", "DLC", "DataLength",
-    "Dir", "EDL", "BRS", "ESI", "RTR", "DataBytes",
-]
+WEBCAN_COLUMNS = list(NORMALIZED_COLUMNS)
 
 
 def load_trace(path: str, rx_only: bool = True) -> pd.DataFrame:
     """Load a webCAN-format CSV trace into a DataFrame.
 
     Columns: t (float epoch), ch (int), id (int), ext (bool), is_fd (bool),
-    rtr (bool), data (bytes), length (int). Sorted by time.
+    rtr (bool), data (bytes), length (int). Input order is preserved; timestamps
+    must already be monotonic non-decreasing.
     """
-    df = pd.read_csv(path, sep=";", dtype=str).fillna("")
-    if list(df.columns[:12]) != WEBCAN_COLUMNS:
-        raise ValueError(f"Unexpected CSV header in {path}: {list(df.columns)}")
+    frames = validate_normalized_trace(path)
 
     out = pd.DataFrame()
-    out["t"] = df["TimestampEpoch"].astype(float)
-    out["ch"] = pd.to_numeric(df["BusChannel"], errors="coerce").astype("Int64")
-    out["id"] = df["ID"].apply(lambda s: int(s, 16))
-    out["ext"] = df["IDE"] == "1"
-    out["is_fd"] = df["EDL"] == "1"
-    out["rtr"] = df["RTR"] == "1"
-    out["dir"] = pd.to_numeric(df["Dir"], errors="coerce").astype("Int64")
-    out["data"] = df["DataBytes"].apply(bytes.fromhex)
-    out["length"] = out["data"].apply(len)
+    out["t"] = [frame.timestamp for frame in frames]
+    out["ch"] = pd.array(
+        [frame.bus_channel for frame in frames], dtype="Int64"
+    )
+    out["id"] = [frame.can_id for frame in frames]
+    out["ext"] = [frame.ide for frame in frames]
+    out["is_fd"] = [frame.edl for frame in frames]
+    out["rtr"] = [frame.rtr for frame in frames]
+    out["dir"] = pd.array([frame.direction for frame in frames], dtype="Int64")
+    out["data"] = [frame.data for frame in frames]
+    out["length"] = [frame.data_length for frame in frames]
     if rx_only:
         out = out[out["dir"] == 0]
-    return out.sort_values("t").reset_index(drop=True)
+    return out.reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2216,6 +2219,115 @@ def plot_fit_diagnostic(out_path, raw, ref, scale, offset, *, name="Signal",
 # Selftest: extraction <-> cantools agreement (no hardware)
 # ---------------------------------------------------------------------------
 
+def _trace_load_selftest() -> bool:
+    """Exercise the normalized trace contract, including order preservation."""
+    import csv
+    import tempfile
+    from pathlib import Path
+
+    base = ["1.0", "0", "123", "0", "2", "2", "0",
+            "0", "0", "0", "0", "AABB"]
+    passed: list[bool] = []
+
+    with tempfile.TemporaryDirectory(prefix="re_trace_validation_") as directory:
+        root = Path(directory)
+
+        def write(name, rows, header=None):
+            path = root / name
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle, delimiter=";", lineterminator="\n")
+                writer.writerow(header or WEBCAN_COLUMNS)
+                writer.writerows(rows)
+            return path
+
+        def rejects(name, rows, expected, header=None):
+            try:
+                load_trace(str(write(name, rows, header)), rx_only=False)
+            except ValueError as exc:
+                return expected in str(exc)
+            return False
+
+        # Valid classical + FD rows load without field or order changes.
+        fd = ["2.0", "1", "1ABCDE", "1", "9", "12", "1",
+              "1", "1", "0", "0", "00112233445566778899AABB"]
+        valid = load_trace(str(write("valid.csv", [base, fd])), rx_only=False)
+        passed.append(
+            valid["t"].tolist() == [1.0, 2.0]
+            and valid["id"].tolist() == [0x123, 0x1ABCDE]
+            and valid["data"].tolist() == [bytes.fromhex("AABB"), bytes.fromhex(fd[-1])]
+            and valid["length"].tolist() == [2, 12]
+        )
+
+        # Equal timestamps are legitimate and their original row order is stable.
+        equal_a = base.copy()
+        equal_b = base.copy()
+        equal_a[2], equal_b[2] = "124", "123"
+        equal = load_trace(
+            str(write("equal.csv", [equal_a, equal_b])), rx_only=False
+        )
+        passed.append(equal["id"].tolist() == [0x124, 0x123])
+
+        backward = base.copy()
+        backward[0] = "0.5"
+        passed.append(
+            rejects("backward.csv", [base, backward], "timestamp reset detected")
+        )
+
+        mismatch = base.copy()
+        mismatch[4], mismatch[5], mismatch[-1] = "2", "1", "AA"
+        passed.append(
+            rejects("length.csv", [mismatch], "DLC and DataLength must match")
+        )
+
+        malformed = base.copy()
+        malformed[-1] = "AA0G"
+        passed.append(rejects("payload.csv", [malformed], "invalid DataBytes byte"))
+
+        bad_id = base.copy()
+        bad_id[2] = "800"
+        passed.append(rejects("id.csv", [bad_id], "exceeds the standard IDE=0 range"))
+
+        bad_direction = base.copy()
+        bad_direction[6] = "Rx"
+        bad_flag = base.copy()
+        bad_flag[7] = "false"
+        passed.append(rejects("direction.csv", [bad_direction], "invalid Dir value"))
+        passed.append(rejects("flag.csv", [bad_flag], "invalid EDL value"))
+
+        negative_time = base.copy()
+        negative_time[0] = "-0.1"
+        nonfinite_time = base.copy()
+        nonfinite_time[0] = "nan"
+        passed.append(
+            rejects("negative.csv", [negative_time], "finite non-negative number")
+        )
+        passed.append(
+            rejects("nonfinite.csv", [nonfinite_time], "finite non-negative number")
+        )
+
+        # Trailing annotation columns are accepted, named, and ignored by analysis.
+        extra_header = WEBCAN_COLUMNS + ["Annotation"]
+        extra = load_trace(
+            str(write("extra.csv", [base + ["kept externally"]], extra_header)),
+            rx_only=False,
+        )
+        passed.append(extra["id"].tolist() == [0x123])
+
+        missing_header = WEBCAN_COLUMNS.copy()
+        missing_header.remove("RTR")
+        passed.append(
+            rejects("schema.csv", [base[:-1]], "expected the first 12 columns", missing_header)
+        )
+
+    trace_ok = all(passed)
+    print(
+        "  normalized trace validation "
+        "(valid/equal/reset/length/payload/id/dir/flag/time/extras/schema) -> "
+        f"{'OK' if trace_ok else 'FAIL'}"
+    )
+    return trace_ok
+
+
 def _selftest() -> int:
     rng = np.random.default_rng(0)
     # (payload_len, [(order, byte_off/bit_start, length, signed), ...])
@@ -2230,7 +2342,7 @@ def _selftest() -> int:
               ("big", 10, 2, False),       # byte 10, 2-byte Motorola
               ("big", 10, 2, True)]),
     ]
-    ok = True
+    ok = _trace_load_selftest()
     for payload_len, cases in suites:
         payloads = [bytes(rng.integers(0, 256, payload_len, dtype=np.uint8))
                     for _ in range(200)]

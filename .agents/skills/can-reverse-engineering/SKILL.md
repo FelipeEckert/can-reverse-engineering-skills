@@ -687,7 +687,11 @@ A **CANedge** user can produce it from an MF4 log with the **mdf2csv** converter
    any analysis, inspect the delimiter and header:**
    - If it is already the semicolon-delimited normalized 12-column format
      (`TimestampEpoch;BusChannel;ID;IDE;DLC;DataLength;Dir;EDL;BRS;ESI;RTR;DataBytes`),
-     use the original file directly as `<log.csv>`.
+     use the original file directly as `<log.csv>`. These canonical columns must be
+     first and in that order; uniquely named trailing annotation columns are accepted
+     and ignored. The loader validates every frame and requires non-negative,
+     monotonic non-decreasing timestamps (equal timestamps are valid). It never sorts,
+     repairs, or otherwise reorders a malformed trace.
    - If it is the comma-delimited SavvyCAN/GVRET format
      (`Time Stamp,ID,Extended,Dir,Bus,LEN,D1,D2,D3,D4,D5,D6,D7,D8`), automatically run
      `python scripts/import_savvycan.py --trace <original.csv> \

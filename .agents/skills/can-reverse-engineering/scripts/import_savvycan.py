@@ -21,25 +21,25 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import re
 import sys
 import tempfile
 from pathlib import Path
+
+from trace_validation import (
+    NORMALIZED_COLUMNS,
+    TraceValidationError,
+    parse_boolean_bit,
+    parse_can_id,
+    parse_direction,
+    parse_nonnegative_int,
+    validate_hex_byte,
+)
 
 
 SAVVYCAN_COLUMNS = [
     "Time Stamp", "ID", "Extended", "Dir", "Bus", "LEN",
     "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8",
 ]
-
-NORMALIZED_COLUMNS = [
-    "TimestampEpoch", "BusChannel", "ID", "IDE", "DLC", "DataLength",
-    "Dir", "EDL", "BRS", "ESI", "RTR", "DataBytes",
-]
-
-_HEX_ID = re.compile(r"^[0-9A-Fa-f]+$")
-_HEX_BYTE = re.compile(r"^[0-9A-Fa-f]{2}$")
-
 
 class SavvyCanImportError(ValueError):
     """Input cannot be converted without guessing or repairing data."""
@@ -50,28 +50,6 @@ def _drop_trailing_empty(row: list[str]) -> list[str]:
     if len(row) == len(SAVVYCAN_COLUMNS) + 1 and row[-1] == "":
         return row[:-1]
     return row
-
-
-def _boolean_bit(value: str, field: str, line: int) -> str:
-    normalized = value.strip().lower()
-    if normalized in {"false", "0"}:
-        return "0"
-    if normalized in {"true", "1"}:
-        return "1"
-    raise SavvyCanImportError(
-        f"line {line}: invalid {field} value {value!r}; expected true/false"
-    )
-
-
-def _direction(value: str, line: int) -> str:
-    normalized = value.strip().lower()
-    if normalized == "rx":
-        return "0"
-    if normalized == "tx":
-        return "1"
-    raise SavvyCanImportError(
-        f"line {line}: invalid Dir value {value!r}; expected Rx or Tx"
-    )
 
 
 def _relative_seconds(timestamp_us: int) -> str:
@@ -120,16 +98,9 @@ def convert(trace: Path, out: Path) -> int:
                             f"trailing empty field, got {len(row)}"
                         )
 
-                    try:
-                        timestamp_us = int(row[0].strip(), 10)
-                    except ValueError as exc:
-                        raise SavvyCanImportError(
-                            f"line {line}: invalid microsecond timestamp {row[0]!r}"
-                        ) from exc
-                    if timestamp_us < 0:
-                        raise SavvyCanImportError(
-                            f"line {line}: timestamp must be non-negative"
-                        )
+                    timestamp_us = parse_nonnegative_int(
+                        row[0], "microsecond timestamp", line
+                    )
                     if (previous_timestamp is not None
                             and timestamp_us < previous_timestamp):
                         raise SavvyCanImportError(
@@ -139,28 +110,16 @@ def convert(trace: Path, out: Path) -> int:
                         )
                     previous_timestamp = timestamp_us
 
+                    ide = parse_boolean_bit(
+                        row[2], "Extended", line, allow_words=True
+                    )
                     can_id = row[1].strip()
-                    if not _HEX_ID.fullmatch(can_id):
-                        raise SavvyCanImportError(
-                            f"line {line}: invalid hexadecimal CAN ID {row[1]!r}"
-                        )
-                    ide = _boolean_bit(row[2], "Extended", line)
-                    direction = _direction(row[3], line)
+                    parse_can_id(can_id, ide, line)
+                    direction = parse_direction(row[3], line, source_words=True)
 
-                    bus = row[4].strip()
-                    try:
-                        int(bus, 10)
-                    except ValueError as exc:
-                        raise SavvyCanImportError(
-                            f"line {line}: invalid Bus value {row[4]!r}"
-                        ) from exc
+                    bus = parse_nonnegative_int(row[4], "Bus", line)
 
-                    try:
-                        length = int(row[5].strip(), 10)
-                    except ValueError as exc:
-                        raise SavvyCanImportError(
-                            f"line {line}: invalid LEN value {row[5]!r}"
-                        ) from exc
+                    length = parse_nonnegative_int(row[5], "LEN", line)
                     if not 0 <= length <= 8:
                         raise SavvyCanImportError(
                             f"line {line}: LEN={length} is not classical CAN (0..8)"
@@ -168,14 +127,11 @@ def convert(trace: Path, out: Path) -> int:
 
                     payload = [value.strip() for value in row[6:6 + length]]
                     for index, value in enumerate(payload, start=1):
-                        if not _HEX_BYTE.fullmatch(value):
-                            raise SavvyCanImportError(
-                                f"line {line}: invalid D{index} byte {value!r}"
-                            )
+                        validate_hex_byte(value, f"D{index}", line)
 
                     writer.writerow([
-                        _relative_seconds(timestamp_us), bus, can_id, ide,
-                        str(length), str(length), direction,
+                        _relative_seconds(timestamp_us), str(bus), can_id, str(ide),
+                        str(length), str(length), str(direction),
                         "0", "0", "0", "0", "".join(payload),
                     ])
                     count += 1
@@ -183,6 +139,8 @@ def convert(trace: Path, out: Path) -> int:
         os.replace(temp_path, out)
         temp_path = None
         return count
+    except TraceValidationError as exc:
+        raise SavvyCanImportError(str(exc)) from exc
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)

@@ -606,4 +606,8 @@ def _selftest() -> int:
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         raise SystemExit(_selftest())
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except common.TraceValidationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
