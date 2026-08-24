@@ -519,12 +519,20 @@ working-directory root. Do not `cd` into the skill folder — that would create
    `physical_hypotheses.py` then enumerates common automotive factor/offset interpretations
    in profiler order and stable hypothesis-generation order. Every result is an
    unconfirmed **HYPOTHESIS** with factual geometry, observed behavior, decoded range, and
-   optional exact opendbc precedent. Opendbc is optional annotation only: absence of the
-   corpus or of an exact match does not affect candidate order or count. Evaluate
+   optional opendbc precedent. **Reference-free analysis is the primary discovery path:**
+   do not use opendbc to guess signal meanings before the trace supports a behavior-based
+   physical signal-family hypothesis. Once such a hypothesis is plausible, automatically
+   consult a configured local opendbc index as secondary precedent. Treat it as supporting
+   evidence, never ground truth; report **exact** precedents separately from
+   **structurally relevant** precedents, and do not count multiple DBC variants from the
+   same OEM/family as independent support. Use precedent to expose ambiguities such as
+   nested/enclosing geometry, factor/offset alternatives, signedness, and common encoding
+   conventions, but do not automatically change candidate ranking solely because of
+   opendbc. Absence of the corpus or of a match is neutral evidence. Evaluate
    interpretations from observed behavior, physical plausibility, corpus precedent, and
    independent reference evidence. When a reference becomes available, return to
-   correlate → bitsearch → calibration/verification; never copy a reference-free proposal
-   into a DBC as fact. Read `references/automotive-signal-priors.md` when using this stage.
+   correlate → bitsearch → calibration/verification. Read
+   `references/automotive-signal-priors.md` when using this stage.
 
    **Optional opendbc setup is external and portable.** Opendbc is not required for the
    reverse-engineering workflow. To prepare an organized symlink corpus from any local
@@ -541,6 +549,12 @@ working-directory root. Do not `cd` into the skill folder — that would create
    normally; a configured index with no exact match is neutral evidence.
 
 7. **Build a single-signal DBC from bitsearch's winner** → deliverables folder.
+   A DBC may also be created from a **strong provisional hypothesis** when the user
+   requests it. In that case, the generated DBC must not imply experimental proof that
+   does not exist. If the trace cannot experimentally distinguish plausible encodings,
+   state that explicitly and keep the result provisional; record the chosen interpretation
+   without concealing alternatives. Report provenance and provisional limitations beside
+   the deliverable when they are not encoded in the DBC itself.
    Use the geometry bitsearch found on the sweep run, but **fit scale/offset on the HOLDS
    run** (clean anchors) with `--ref-window`:
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/build_dbc.py --trace temp-output/trace_run_<holds>.csv \
@@ -632,6 +646,9 @@ working-directory root. Do not `cd` into the skill folder — that would create
    systematic scale/offset bias is surfaced (and `[!]`-flagged) even when Spearman
    is ~1. A flagged bias does NOT fail the gate (it can be legitimate, e.g.
    indicated speed) but you must report it to the user.
+   Without a synchronized physical reference, validation establishes
+   **self-consistency only**, not experimental confirmation of the signal meaning or
+   encoding. Report that limitation explicitly for any provisional DBC.
 
 8b. **Calibrate scale/offset to known points (recommended for stationary signals).**
    The ramp fit nails the *field* but its absolute scale can drift (human lag).
