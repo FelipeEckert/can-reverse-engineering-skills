@@ -9,26 +9,26 @@ description: >
   correlate → bitsearch → build_dbc → verify workflow. Supports normalized webCAN
   CSV and SavvyCAN/GVRET CSV, plus CANedge MF4 after external conversion, with
   OBD2, GPS, or other DBC-decoded references; live CANsub capture with a human
-  reference; and video-based OCR references. Handles
-  classical CAN, CAN FD, and bit-packed fields. Look for named logs in the working
-  directory and TEMP before asking the user where they are.
+  reference; and video-based OCR references. Handles classical CAN, CAN FD,
+  arbitrary-start/length little-endian fields, and byte-aligned big-endian fields.
+  Look for named logs in the working directory and TEMP before asking the user
+  where they are.
 ---
 
 # CAN reverse engineering
 
-A deterministic, scriptable workflow for reverse engineering CAN signals with a
-CANsub. The bundled scripts in `scripts/` each cover one stage. The scripts never
-transmit **data** frames onto the bus. By default, though, `capture.py` connects
-in **normal mode** so the CANsub *acknowledges* the frames it receives (the ACK
-bit). This is required for **single-node sensor-to-CAN modules**: with no ACK, a
-lone transmitting node hits ACK errors, gets stuck retransmitting, and its values
-won't update cleanly. On a multi-node bus (where other nodes supply the ACK) pass
-`capture.py --listen-only` to keep the CANsub fully silent. Bit-rate
-auto-detection (`detect_bus.py`) is always passive/`listen_only` — you can't ACK
-while cycling candidate rates — so ACK only begins on the capture connection,
-after the rate is known. Human timing/value input is logged to a separate
-*sidecar* file and aligned to the trace by epoch timestamp (the CANsub sets its
-clock to host time on connect, so trace and sidecar share a reference).
+A deterministic, scriptable workflow for reverse engineering CAN signals from
+recorded logs or through optional live CANsub capture. The bundled scripts in
+`scripts/` each cover one stage. The live scripts never transmit **data** frames
+onto the bus. The safe default is the `vehicle` profile: capture inherits
+**silent/listen-only** mode from `temp-output/bus.json`, so passive capture is the
+baseline. Use the explicit `bench` profile (or `capture.py --normal`) only for a
+**single-node sensor-to-CAN module** that needs the CANsub to supply the ACK bit;
+without an ACK, a lone transmitting node can get stuck retransmitting. Bit-rate
+auto-detection (`detect_bus.py`) is always passive/`listen_only`. Human
+timing/value input is logged to a separate *sidecar* file and aligned to the trace
+by epoch timestamp (the CANsub sets its clock to host time on connect, so trace
+and sidecar share a reference).
 
 ## Scope (v1)
 
@@ -47,10 +47,11 @@ clock to host time on connect, so trace and sidecar share a reference).
   extracted with arbitrary-precision integers, so a signal can sit anywhere in an
   FD frame. (The generated DBC decodes FD correctly via the message length; it
   does not emit the DBC `VFrameFormat` FD attribute.)
-- Fields may be **bit-packed** (sub-byte, off byte boundaries, behind a leading
-  flag bit) — common in compact sensor frames. `survey.py` detects this and
-  proposes a field map; `bitsearch.py` finds the exact field. Don't assume
-  byte alignment.
+- Little-endian fields may be **bit-packed** (sub-byte, off byte boundaries,
+  behind a leading flag bit) — common in compact sensor frames. `survey.py`
+  proposes a field map and `bitsearch.py` searches arbitrary little-endian start
+  bits and lengths. Current big-endian search is limited to byte-aligned widths;
+  do not claim arbitrary bit-packed big-endian support.
 - `survey.py` flags **rolling counters** (excluded from correlation) and
   **checksum-like** bytes (a hint — not excluded, since a wide signal's low byte
   can resemble one).
@@ -159,11 +160,13 @@ good at:
 - **Discrete state** (door lock 0/1, gear P/R/N/D, wiper off/low/high): a Holds run on
   those states is enough; `correlate --type continuous` then `bitsearch` finds the bit.
   (A *truly momentary* event you cannot hold is the one exception: headless
-  `annotate.py --mode event` + `correlate --type discrete`. The headless equivalent of
+  `annotate.py --mode discrete` + `correlate --type discrete`. The headless equivalent of
   the slider is `annotate.py --mode continuous`.)
-- **Continuous + dynamic** (speed/RPM while driving, can't park): the Sweep slider tracks
-  the live value as the user drives; add a Holds run by matching a few target levels
-  (0/20/40/60/80) for calibration.
+- **Continuous + dynamic** (speed/RPM that needs a trip): a passenger/operator may
+  track the value with the Sweep slider while the driver concentrates on driving,
+  or use a controlled test setup. The driver must not operate the tools. Add a
+  Holds run by matching a few target levels (0/20/40/60/80) for calibration when
+  this can be done safely.
 
 **Tell the user the protocol explicitly:** for HOLDS, settle BEFORE clicking (only the
 next `--window` s is sampled); for SWEEP, drag smoothly across the full range — a few
@@ -210,9 +213,9 @@ Install the dependency set for the workflow you need:
 The vision set also requires the **FFmpeg `ffprobe` executable on `PATH`**; it is a
 system prerequisite and is not installed by pip. **Do not rely on a global Python.**
 
-**In every command in this skill, `python` means the venv interpreter:**
-- Windows: `.venv\Scripts\python.exe`
-- macOS / Linux: `.venv/bin/python`
+Commands below use the macOS/Linux venv interpreter, `.venv/bin/python`. On
+Windows, replace that token with `.venv\Scripts\python.exe`. Never substitute a
+global Python.
 
 Before running a script, confirm `.venv/` exists and has the matching dependency
 set. **If it does not, stop and ask the user to run the one-time setup** — do not
@@ -224,28 +227,27 @@ Those commands install every feature. For offline-only use, replace
 `requirements.txt` with `requirements-core.txt`; install `requirements-live.txt`
 or `requirements-vision.txt` for a self-contained feature environment.
 
-## CANsub technical reference
+## Live interface scope
 
-For any CANsub hardware, API, or protocol detail needed while running this
-workflow — the REST / WebSocket API, bit-timing, hardware filters,
-connectors / specs, firmware, certificate install, or `python-can-cansub` usage
-— consult the **`cansub-knowledge`** skill in this repo. Its bundled docs are
-authoritative; prefer them over training-data recall.
+Live discovery, bit-rate probing, capture, and health checks currently target
+CANsub through `python-can-cansub`. SocketCAN and ETAS live backends are not
+implemented. Recorded logs from other interfaces remain usable after conversion
+to the normalized CSV contract. For CANsub hardware, firmware, connector, or API
+details not documented here, consult current CSS Electronics and
+`python-can-cansub` documentation rather than inferring them.
 
 ## Workflow
 
 **Run every command from the root of your working directory** (your cwd — where
 `.venv/`, `temp-output/`, and `decoding-output/` live), and invoke every script
-with the venv interpreter (see **Environment** above). The skill is installed under
-`.agents/skills/can-reverse-engineering/`, so in the commands below **`scripts/`
-is shorthand for `.agents/skills/can-reverse-engineering/scripts/`** — write that
-full path when you run them (only the *scripts* live under the skill; every *output*
-path stays relative to your cwd so it lands at the working-directory root). Do not
-`cd` into the skill folder — that would create `temp-output/`/`decoding-output/`
-inside the skill.
+with the venv interpreter (see **Environment** above). Every example below uses
+the full repository-relative script path under
+`.agents/skills/can-reverse-engineering/`; output paths remain relative to the
+working-directory root. Do not `cd` into the skill folder — that would create
+`temp-output/`/`decoding-output/` inside the skill.
 
 1. **Init: device + bit-rate + profile + health (always first).**
-   `python scripts/detect_bus.py --profile <vehicle|bench>`
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/detect_bus.py --profile <vehicle|bench>`
    Discovers the CANsub via mDNS, auto-detects the bit-rate passively
    (listen_only + error frames; first valid frame wins), records the **profile**,
    reads the device **bus status** to sanity-check health, and writes
@@ -267,13 +269,14 @@ inside the skill.
    recorded mode on any capture with `--listen-only` / `--normal`.
 
 2. **Capture a baseline / working trace.**
-   `python scripts/capture.py --duration 15 --label baseline`
-   Writes `temp-output/trace_baseline.csv` (webCAN CSV format). Connects in
-   normal mode so the CANsub ACKs the sensor (needed for single-node modules);
-   add `--listen-only` for fully passive sniffing on a multi-node bus.
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py --duration 15 --label baseline`
+   Writes `temp-output/trace_baseline.csv` (webCAN CSV format). It inherits the
+   recorded profile: the default `vehicle` profile is passive/listen-only, while
+   the explicit `bench` profile supplies ACK for a single-node module. Override a
+   specific capture only when needed with `--listen-only` or `--normal`.
 
 3. **Survey the bus (this BASELINE scan maps bus STRUCTURE, not the target).**
-   `python scripts/survey.py --trace temp-output/trace_baseline.csv --suffix steady \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py --trace temp-output/trace_baseline.csv --suffix steady \
        --plots-dir decoding-output/<application>/<signal>/analysis-plots/`
    Per-ID stats (count, cycle time, DLC, latest payload) plus a bit-activity
    "heatmap": which bits/bytes are static vs changing, byte entropy, rolling
@@ -304,29 +307,32 @@ inside the skill.
    edits fields in-browser. `--mode both` (default) shows a **Holds | Sweep** toggle;
    pass the unit / range / known values up front. (Comma-leading-with-`-` values need the
    `=` form: `--state-values=-9.81,0,9.81`.)
-     - gauge / accelerometer: `python scripts/flask_sync.py --unit m/s^2 --min -9.81 --max 9.81 --state-values=-9.81,0,9.81 [--window 2]`
-     - discrete state (e.g. a lock bit): `python scripts/flask_sync.py --unit state --min 0 --max 1 --state-values 0,1`
-     - dynamic signal (e.g. speed): `python scripts/flask_sync.py --unit km/h --min 0 --max 120 --state-values 0,20,40,60,80,100`
+     - gauge / accelerometer: `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/flask_sync.py --unit m/s^2 --min -9.81 --max 9.81 --state-values=-9.81,0,9.81 [--window 2]`
+     - discrete state (e.g. a lock bit): `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/flask_sync.py --unit state --min 0 --max 1 --state-values 0,1`
+     - dynamic signal (e.g. speed): `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/flask_sync.py --unit km/h --min 0 --max 120 --state-values 0,20,40,60,80,100`
    Open http://127.0.0.1:5000. For a **continuous** signal record TWO runs:
    **(a) a SWEEP run** — toggle to *Sweep*, Start, drag the slider to track the signal in
    a few slow full sweeps spanning the whole range, Stop; **(b) a HOLDS run** — toggle to
    *Holds*, Start, settle at each known value and click it, Stop. (A **discrete-state**
-   signal needs only the Holds run.)
+   signal needs only the Holds run.) For a dynamic driving capture, a
+   passenger/operator must run this UI while the driver focuses on driving; use a
+   controlled stationary/test setup whenever possible.
    **Each Start records a NEW numbered run** → `trace_run_<N>.csv` + `sidecar_run_<N>.csv`
    (a consistent pair; nothing overwritten/mixed), **tagged holds/sweep** in
    `runs_run.json` and listed in the UI. **Note which run number is the sweep and which is
-   the holds** — you analyse them differently below. Add `--listen-only` for multi-node
-   sniffing.
+   the holds** — you analyse them differently below. The default `vehicle` profile
+   already makes this passive/listen-only; `--listen-only` can force that mode for
+   an individual run.
    - **Sweep run** = dense `kind=value`, no anchors → analyse **without `--ref-window`**
      (continuous). Used for identification + resolution.
    - **Holds run** = `kind=anchor` windows → analyse **with `--ref-window <window>`**.
      Used for calibration + absolute verify.
-   Headless alternative: `python scripts/capture.py --duration 60 --label run` plus
-   `python scripts/annotate.py --mode continuous --label run` (the slider's headless twin —
+   Headless alternative: `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py --duration 60 --label run` plus
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/annotate.py --mode continuous --label run` (the slider's headless twin —
    keyboard-driven dense `kind=value` + parked-value heartbeat).
 
 4b. **Survey the SWEEP trace (the target lights up) and DIFF against the baseline.**
-   `python scripts/survey.py --trace temp-output/trace_run_<sweep>.csv --suffix sweep \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py --trace temp-output/trace_run_<sweep>.csv --suffix sweep \
        --baseline temp-output/survey_baseline.json \
        --plots-dir decoding-output/<application>/<signal>/analysis-plots/`
    Re-run the survey on the **sweep** run (recorded while the signal was exercised). With
@@ -341,7 +347,7 @@ inside the skill.
    alongside the steady one.
 
 5. **Correlate → a coarse ID shortlist (on the SWEEP run, no `--ref-window`).**
-   `python scripts/correlate.py --trace temp-output/trace_run_<sweep>.csv \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/correlate.py --trace temp-output/trace_run_<sweep>.csv \
        --sidecar temp-output/sidecar_run_<sweep>.csv --type continuous`
    Run identification on the **sweep** run **without `--ref-window`** (the dense slider
    stream is a continuous reference): the smooth ramp makes the true field score ~1.0
@@ -360,7 +366,7 @@ inside the skill.
    state with only a Holds run, add `--ref-window 2`.)
 
 6. **bitsearch → the canonical field (on the SWEEP run; the field of record).**
-   `python scripts/bitsearch.py --trace temp-output/trace_run_<sweep>.csv \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/bitsearch.py --trace temp-output/trace_run_<sweep>.csv \
        --sidecar temp-output/sidecar_run_<sweep>.csv --id 0x123 --lag 0.2`
    (Lag: `--lag <seed>` + `--lag-refine <±window>` seeds the search from correlate's
    reported lag; for the **video workflow** pass `--max-lag 2` instead — the symmetric
@@ -368,14 +374,17 @@ inside the skill.
    Run this on the **sweep** run **without `--ref-window`** so the continuous transitions
    feed **resolution-refinement** — it grows the field LSB-ward to its FULL width (a
    holds-only run under-reads it as a narrow high-bit slice; see the resolution note below).
-   Exhaustively scans **start-bit × length × endianness × sign**, ranks by
+   Exhaustively scans arbitrary **start-bit × length × sign** permutations for
+   little-endian fields and byte-aligned **offset × width × sign** permutations
+   for big-endian fields, then ranks by
    lag-aligned linear-R² + reference-free **plausibility** (wrap-free / smooth) +
    Spearman, dedups overlapping reads, restricts boundaries to *active* bits (so it
    never grabs a constant flag/padding bit), and prints a **Decision** line stating
    the winning permutation, the fitted scale (with sign), and why it won. Copy its
    `build_dbc.py …` command. This — not correlate's byte guess — is the field of
-   record. (Seed `--min-len/--max-len` from the survey field map for packed frames;
-   they bound **both** little- and big-endian widths, default `--max-len 24`.)
+   record. (Seed `--min-len/--max-len` from the survey field map for packed
+   little-endian frames; they bound little-endian bit lengths and byte-aligned
+   big-endian widths, default `--max-len 24`.)
    **Over-wide guard:** when two co-varying fields sit side by side (a wheel-speed
    *pair*, an L/R or X/Y axis), reading them together still correlates ~perfectly
    but yields a fragile field with a tiny scale (`true ÷ 256^extra`). bitsearch's
@@ -468,12 +477,12 @@ inside the skill.
    Use this branch after survey when no external reference is available yet. If the input
    is SavvyCAN/GVRET CSV, normalize it first with `import_savvycan.py` as described in the
    Offline workflow; never overwrite the original. Then run the reproducible bridge:
-   `python scripts/survey.py --trace <normalized.csv> \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py --trace <normalized.csv> \
        --json temp-output/survey_<label>.json`
-   `python scripts/candidate_profiler.py --trace <normalized.csv> \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/candidate_profiler.py --trace <normalized.csv> \
        --survey temp-output/survey_<label>.json \
        --out temp-output/candidate-analysis/candidate-ranking.json`
-   `python scripts/physical_hypotheses.py \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/physical_hypotheses.py \
        --candidates temp-output/candidate-analysis/candidate-ranking.json \
        --out temp-output/physical-hypotheses.json`
    The profiler uses only observed CAN behavior and field geometry. It excludes
@@ -494,11 +503,11 @@ inside the skill.
 
    **Optional opendbc setup is external and portable.** Opendbc is not required for the
    reverse-engineering workflow. To prepare an organized symlink corpus from any local
-   checkout, run `python scripts/setup_opendbc_corpus.py \
+   checkout, run `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/setup_opendbc_corpus.py \
        --opendbc-root /path/to/opendbc --corpus-out /path/to/opendbc-corpus`; add
    `--generate` if the checkout's official generated DBC outputs are missing. Then build
    the read-only index with
-   `python scripts/opendbc_reference.py --corpus /path/to/opendbc-corpus \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/opendbc_reference.py --corpus /path/to/opendbc-corpus \
        --out-dir /path/to/opendbc-reference`, or set `CAN_RE_OPENDDBC_CORPUS` instead of
    passing `--corpus`. Supply the resulting `signals.tsv` to physical hypotheses with
    `--opendbc-signals /path/to/opendbc-reference/signals.tsv`, or set
@@ -509,7 +518,7 @@ inside the skill.
 7. **Build a single-signal DBC from bitsearch's winner** → deliverables folder.
    Use the geometry bitsearch found on the sweep run, but **fit scale/offset on the HOLDS
    run** (clean anchors) with `--ref-window`:
-   `python scripts/build_dbc.py --trace temp-output/trace_run_<holds>.csv \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/build_dbc.py --trace temp-output/trace_run_<holds>.csv \
        --sidecar temp-output/sidecar_run_<holds>.csv --ref-window 2 \
        --id 0x123 --order little --start-bit 8 --length-bits 16 --lag 0.2 \
        --name <signal> [--drop-extreme] --out decoding-output/<application>/<signal>/<signal>.dbc`
@@ -575,7 +584,7 @@ inside the skill.
 8. **Verify — this is a GATE, not a formality.** Verify on the **HOLDS** run (absolute
    levels, with `--ref-window`); for extra confidence also verify the **SWEEP** run
    (tracking across the full range, no `--ref-window`).
-   `python scripts/verify.py --trace temp-output/trace_run_<holds>.csv \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/verify.py --trace temp-output/trace_run_<holds>.csv \
        --dbc decoding-output/<application>/<signal>/<signal>.dbc \
        --sidecar temp-output/sidecar_run_<holds>.csv --ref-window 2 \
        [--drop-extreme] --png decoding-output/<application>/<signal>/<signal>.png`
@@ -606,7 +615,7 @@ inside the skill.
 
    **(i) Tagged anchors in one capture (the steady-holds app)** — park at each known
    value, hold, click it (logs `anchor` + dense `value`). Then:
-   `python scripts/calibrate.py --id 0x9 --order little --start-bit 1 --length-bits 10 \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/calibrate.py --id 0x9 --order little --start-bit 1 --length-bits 10 \
        --trace temp-output/trace_run_1.csv --sidecar temp-output/sidecar_run_1.csv \
        --window 2 --name <signal> --unit m/s^2 \
        --validate-trace temp-output/trace_run_1.csv --validate-sidecar temp-output/sidecar_run_1.csv \
@@ -616,7 +625,7 @@ inside the skill.
    deviates` (the wrong-field trap).
 
    **(ii) Separate steady captures** — one short capture per point:
-   `python scripts/calibrate.py --id 0x9 --order little --start-bit 1 --length-bits 10 \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/calibrate.py --id 0x9 --order little --start-bit 1 --length-bits 10 \
        --point -9.81=temp-output/trace_xdown_1.csv --point 9.81=temp-output/trace_xup_1.csv \
        --name <signal> --unit m/s^2 --out decoding-output/<application>/<signal>/<signal>.dbc`
    2 points → exact line; 3+ → least-squares (R² flags nonlinearity). Re-run
@@ -644,8 +653,9 @@ entirely.** Reference‑source‑agnostic: we decode strictly what the user's DB
 defines; multiplexed DBCs (e.g. OBD2) decode transparently via cantools.
 
 **Bundled OBD2 DBC — use it for any OBD2 reference.** This skill ships the standard
-OBD2 PID database at **`assets/obd2-dbc/OBD-v4.4.dbc`** (relative to this skill's
-directory). Whenever the reference is an **OBD2 response** — engine RPM, vehicle
+OBD2 PID database at
+**`.agents/skills/can-reverse-engineering/assets/obd2-dbc/OBD-v4.4.dbc`**.
+Whenever the reference is an **OBD2 response** — engine RPM, vehicle
 speed, coolant temperature, throttle, etc. (typically on response IDs `0x7E8`–
 `0x7EF`) — pass this file as `--dbc`; do **not** ask the user for an OBD2 DBC.
 cantools decodes its multiplexed PID messages directly, so `--signal rpm` /
@@ -661,21 +671,25 @@ CANedge/CANsub CAN channels. GPS **speed** (`GnssSpeed.Speed`, m/s, machine-deco
 and near-zero lag) is an excellent reference for reverse-engineering a proprietary
 **vehicle-speed** signal; the IMU **acceleration / angular-rate** channels make good
 references for proprietary accel/gyro signals, and position/heading/altitude are
-available too. This skill ships both databases (relative to this skill's directory):
+available too. This skill ships both databases at these repository-relative paths:
 
-- **CANmod.gps** (GPS-to-CAN module) → **`assets/gps-dbc/canmod-gnss.dbc`**. GNSS/IMU
+- **CANmod.gps** (GPS-to-CAN module) →
+  **`.agents/skills/can-reverse-engineering/assets/gps-dbc/canmod-gnss.dbc`**. GNSS/IMU
   messages on CAN IDs `0x1`–`0x9` (`GnssStatus`, `GnssTime`, `GnssPosition`,
   `GnssAltitude`, `GnssAttitude`, `GnssOdo`, `GnssSpeed`, `GnssGeofence`, `GnssImu`).
 - **CANedge internal GPS/IMU** (recorded on the device's internal **CAN9** channel) →
-  **`assets/gps-dbc/canedge-internal-can9.dbc`** (firmware 01.09). Same GNSS/IMU set
+  **`.agents/skills/can-reverse-engineering/assets/gps-dbc/canedge-internal-can9.dbc`**
+  (firmware 01.09). Same GNSS/IMU set
   on IDs `0x65`–`0x6F`, plus device housekeeping (`Heartbeat`, `TimeCalendar`,
   `TimeExternal`, `ImuAlign`).
 
 Pass the matching file as `--dbc`; do **not** ask the user for a GPS DBC. Pick the
-file by source: **internal CANedge GPS → `canedge-internal-can9.dbc`** (the GPS data
-sits on the internal CAN9 message IDs), **CANmod.gps module →
-`canmod-gnss.dbc`**. If unsure which, run `decode_reference.py` (step 1) without
-`--signal` against each and use the one whose IDs are present in the log.
+file by source: **internal CANedge GPS →
+`.agents/skills/can-reverse-engineering/assets/gps-dbc/canedge-internal-can9.dbc`**
+(the GPS data sits on the internal CAN9 message IDs), **CANmod.gps module →
+`.agents/skills/can-reverse-engineering/assets/gps-dbc/canmod-gnss.dbc`**. If
+unsure which, run `decode_reference.py` (step 1) without `--signal` against each
+and use the one whose IDs are present in the log.
 `--signal speed` resolves `GnssSpeed.Speed` (a case-insensitive *exact* match wins
 over the `SpeedAccuracy` substring, so it's unambiguous); use `--signal AccelerationX`
 etc. for the IMU channels. As always, note the printed **`--exclude-ids`** (the GPS
@@ -705,7 +719,7 @@ not bundled or installed by this repository. Then use the converted CSV unchange
      repairs, or otherwise reorders a malformed trace.
    - If it is the comma-delimited SavvyCAN/GVRET format
      (`Time Stamp,ID,Extended,Dir,Bus,LEN,D1,D2,D3,D4,D5,D6,D7,D8`), automatically run
-     `python scripts/import_savvycan.py --trace <original.csv> \
+     `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/import_savvycan.py --trace <original.csv> \
          --out temp-output/trace_<stem>_normalized.csv`.
      **Never modify or overwrite the original log**; use the generated normalized
      trace as `<log.csv>` for every remaining step. If the adapter reports a
@@ -716,13 +730,16 @@ not bundled or installed by this repository. Then use the converted CSV unchange
 
 1. **Decode + confirm the reference.** First list what's decodable (covers "user
    forgot which signal / which DBC"). For an OBD2 reference, `<reference.dbc>` is
-   the bundled `assets/obd2-dbc/OBD-v4.4.dbc`; for a CSS Electronics GPS reference it
-   is `assets/gps-dbc/canmod-gnss.dbc` (CANmod.gps) or
-   `assets/gps-dbc/canedge-internal-can9.dbc` (CANedge internal GPS on CAN9) — see the
-   bundled-DBC notes above:
-   `python scripts/decode_reference.py --trace <log.csv> --dbc assets/obd2-dbc/OBD-v4.4.dbc`
+   the bundled
+   `.agents/skills/can-reverse-engineering/assets/obd2-dbc/OBD-v4.4.dbc`; for a
+   CSS Electronics GPS reference it is
+   `.agents/skills/can-reverse-engineering/assets/gps-dbc/canmod-gnss.dbc`
+   (CANmod.gps) or
+   `.agents/skills/can-reverse-engineering/assets/gps-dbc/canedge-internal-can9.dbc`
+   (CANedge internal GPS on CAN9) — see the bundled-DBC notes above:
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/decode_reference.py --trace <log.csv> --dbc .agents/skills/can-reverse-engineering/assets/obd2-dbc/OBD-v4.4.dbc`
    Then decode the chosen signal into a sidecar + plot:
-   `python scripts/decode_reference.py --trace <log.csv> --dbc <reference.dbc> \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/decode_reference.py --trace <log.csv> --dbc <reference.dbc> \
        --signal speed --label speed_ref --out temp-output/sidecar_speed_ref.csv \
        --png decoding-output/<application>/<signal>/analysis-plots/0-decode-reference.png`
    (the `0-` prefix sorts the reference-confirmation plot ahead of the numbered
@@ -735,11 +752,11 @@ not bundled or installed by this repository. Then use the converted CSV unchange
    search step so the search can't trivially self‑match inside the reference frame.
 
 2. **Survey the raw bus**, excluding the reference source:
-   `python scripts/survey.py --trace <log.csv> --exclude-ids <src-ids> \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py --trace <log.csv> --exclude-ids <src-ids> \
        --plots-dir decoding-output/<application>/<signal>/analysis-plots/`
 
 3. **Correlate** raw vs the decoded reference, excluding the source:
-   `python scripts/correlate.py --trace <log.csv> \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/correlate.py --trace <log.csv> \
        --sidecar temp-output/sidecar_speed_ref.csv --type continuous \
        --exclude-ids <src-ids> --plots-dir …/analysis-plots/`
 
@@ -794,7 +811,7 @@ align):** there is no `creationdate`, so the script falls back to `creation_time
 **warns**. Don't trust that blindly — have the user record a **short clock-test clip of
 the webCAN header clock** (the HH:MM:SS it shows) for a few seconds in the SAME session,
 then measure the offset and apply it:
-  `python scripts/vision_reference.py --video <clock-test.mov> --measure-clock <x,y,w,h>`
+  `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/vision_reference.py --video <clock-test.mov> --measure-clock <x,y,w,h>`
   (find the clock ROI with `--dump-frames`; add `--display-utc-offset <hours>` if the clock's
   local timezone can't be inferred from the anchor). It prints the **anchor-vs-true-clock
   offset** and the exact **`--time-offset <s>`** to pass when extracting the real clip
@@ -810,7 +827,7 @@ then measure the offset and apply it:
 
 1. **Inspect frames → set the ROI + unit.** Dump a handful of frames spread across the
    clip and **look at them yourself**:
-   `python scripts/vision_reference.py --video <video> --dump-frames 9`
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/vision_reference.py --video <video> --dump-frames 9`
    This writes `temp-output/vision-frames/fNN_t<sec>.png` and prints the duration +
    selected metadata timestamp. **Read the frames** to (a) read the on-screen
    **quantity and unit**
@@ -819,7 +836,7 @@ then measure the offset and apply it:
    `100.0`). Do **not** ask the user for the location — determine it from the frames.
 
 2. **Extract the reference.** OCR the chosen ROI across the clip into a sidecar:
-   `python scripts/vision_reference.py --video <video> --roi <x,y,w,h> \
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/vision_reference.py --video <video> --roi <x,y,w,h> \
        --label <signal>_ref --unit <unit> --fps 20 \
        --png decoding-output/<application>/<signal>/analysis-plots/0-vision-reference.png`
    (`--fps` floor is 1 Hz; 20 Hz is typical. `--conf` drops low-confidence reads;
@@ -843,7 +860,7 @@ then measure the offset and apply it:
 
 3. **Confirm the reference against the video — MANDATORY GATE (OCR can misread).** Launch
    the review app and have the **user** confirm it tracks the on-screen number:
-   `python scripts/vision_review.py --video <video> --sidecar temp-output/sidecar_<signal>_ref.csv`
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/vision_review.py --video <video> --sidecar temp-output/sidecar_<signal>_ref.csv`
    Open `http://127.0.0.1:5001` — video (top-left), a big **stat readout** of the current
    digitized value (top-right), and the **uPlot reference with a playhead** (bottom);
    Play/Reset + native scrub keep them in sync. Also show `0-vision-reference.png` and the
@@ -994,8 +1011,8 @@ is unchanged.
 - For discrete-STATE targets (lock, gear, wiper), use `--mode holds` with the state
   values and the normal `--type continuous` pipeline — a few-level hold finds the
   bit/field. Only a *truly momentary* event you cannot hold needs the headless
-  `annotate.py --mode event` + `correlate --type discrete` fallback (no flask tab).
-- `python scripts/common.py --selftest` validates bitfield extraction ↔ cantools
+  `annotate.py --mode discrete` + `correlate --type discrete` fallback (no flask tab).
+- `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/common.py --selftest` validates bitfield extraction ↔ cantools
   mapping AND the analytical primitives (plausibility, scale-roundness,
   signed-Spearman, **agnostic sentinel detection** — fraction>2%, multi-value /
   non-all-ones / signed most-negative sentinels detected; smooth ramps & full-range
@@ -1010,7 +1027,7 @@ is unchanged.
   neighbour, never moves a signed MSB)) AND headlessly smoke-tests all the analysis
   plots (incl. the `3c-bit-cascade.png`); run it after editing identification/extraction, the outlier detector, the
   anchor/round or resolution calibration, or plotting logic.
-  `python scripts/bitsearch.py --selftest` validates the overlap/parsimony ranking
+  `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/bitsearch.py --selftest` validates the overlap/parsimony ranking
   (over-wide read demotion, high-byte/wrapping-slice rejection), **that auto-masking a
   sentinel flips the winner from a coarse slice back to the true wide field**, and
   **that the flip-rate cascade guard keeps a wide field whose extra LSBs continue the
@@ -1025,9 +1042,10 @@ is unchanged.
   `--state-values`, `--window`, optional `--instructions`). Each Start writes a fresh
   numbered `trace_run_<N>.csv` + `sidecar_run_<N>.csv` pair **tagged holds/sweep**
   (reuses `capture.resolve_config` + `bus.json`); query `/api/runs` or read
-  `runs_<label>.json` to see runs and their mode. `--port` if 5000 is taken,
-  `--listen-only` for fully-passive multi-node sniffing. (Headless twins:
-  `annotate.py --mode continuous` ≈ sweep, `annotate.py --mode event` = momentary.)
+  `runs_<label>.json` to see runs and their mode. Use `--port` if 5000 is taken;
+  capture inherits the passive `vehicle` profile by default, and `--listen-only`
+  explicitly forces silent mode. (Headless twins:
+  `annotate.py --mode continuous` ≈ sweep, `annotate.py --mode discrete` = momentary.)
 - **Vision reference (`vision_reference.py` + `vision_review.py`).** For the **Vision
   workflow**, `vision_reference.py` has these modes: `--dump-frames N` writes evenly-spaced
   frames for **you** to inspect (set the ROI + read the unit — never ask the user for the

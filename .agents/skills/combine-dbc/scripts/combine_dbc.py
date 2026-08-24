@@ -5,7 +5,7 @@ Scans an application's decoding-output folder for per-signal DBC files and merge
 them into a single combined DBC at the application level. Re-runnable at any time
 as new signals are confirmed.
 
-Layout it expects (produced by the cansub-reverse-engineering skill):
+Layout it expects (produced by the can-reverse-engineering skill):
     decoding-output/<application>/<signal>/<signal>.dbc   # inputs (one per signal)
     decoding-output/<application>/<application>.dbc        # combined output
 
@@ -13,9 +13,11 @@ Signals sharing a CAN frame id are merged into one message; a re-merged signal o
 the same name replaces the previous definition (so re-running is idempotent).
 
 Examples:
-    python combine_dbc.py --app sensor-to-can
-    python combine_dbc.py --app-dir decoding-output/sensor-to-can --out combined.dbc
-    python combine_dbc.py --app sensor-to-can --inputs a/a.dbc b/b.dbc
+    .venv/bin/python .agents/skills/combine-dbc/scripts/combine_dbc.py --app sensor-to-can
+    .venv/bin/python .agents/skills/combine-dbc/scripts/combine_dbc.py \
+        --app-dir decoding-output/sensor-to-can --out combined.dbc
+    .venv/bin/python .agents/skills/combine-dbc/scripts/combine_dbc.py \
+        --app sensor-to-can --inputs a/a.dbc b/b.dbc
 """
 from __future__ import annotations
 

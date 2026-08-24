@@ -33,6 +33,6 @@ if errorlevel 1 (
 echo.
 echo ===========================================================================
 echo  Done. The environment is ready in .venv
-echo  Open Claude Code in this folder and ask it to reverse engineer a CAN signal.
+echo  Open this folder in Codex and ask it to reverse engineer a CAN signal.
 echo ===========================================================================
 endlocal

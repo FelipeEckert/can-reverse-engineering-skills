@@ -8,9 +8,13 @@ run and how to interpret results.
 
 - **Stationary vs driving**
   - *Stationary*: reproducible while parked (door lock/unlock, wipers, AC, windows).
-    You can trigger the action on demand → use **discrete event** annotation.
+    For a persistent discrete state, use **Holds** and label each state. Use
+    headless **discrete event** annotation only for a truly momentary event that
+    cannot be held.
   - *Driving*: only varies in real operation (speed, RPM, SoC, GPS). Needs a trip
-    and a reference value logged over time → use **continuous value** annotation.
+    and a reference value logged over time → use **continuous value** annotation,
+    operated by a passenger/operator rather than the driver, or use a controlled
+    test setup.
 - **Discrete vs continuous**
   - *Discrete*: a small set of states (lock=0/1, gear=P/R/N/D). Usually **1–2 bits**.
     scale=1, offset=0 typically suffice.
@@ -28,10 +32,11 @@ session:
 - **bench** → NORMAL / ACK. Only for a *single* node on a desk (one ECU/sensor):
   with nobody else to ACK, the CANsub must ACK or the lone node error-floods.
 
-On a live vehicle: prefer silent; this skill never transmits **data** frames
-(no replay/injection) — confirming a discrete signal by replaying a frame is
-deliberately out of scope. Never reverse-engineer on a *moving* vehicle. Bit-rate
-probing is always passive. The init step reads the device bus status
+On a live vehicle, use the default silent profile; this skill never transmits
+**data** frames (no replay/injection) — confirming a discrete signal by replaying
+a frame is deliberately out of scope. The driver must not operate capture or
+reference tools while driving: use a passenger/operator, or prefer a controlled
+stationary/test setup. Bit-rate probing is always passive. The init step reads the device bus status
 (state / frame-rate / RX-TX-bus error counters) and warns if the bus is unhealthy
 (bus-off, error-passive, idle, or erroring) — a fast way to catch a wrong profile,
 wrong bit-rate, wiring/termination fault, or a dead bus before capturing.
@@ -44,8 +49,9 @@ wrong bit-rate, wiring/termination fault, or a dead bus before capturing.
 4. **Compare real-world vs CAN data** ("needle in a haystack"). — `capture.py`
    + `annotate.py` to record a synchronized reference; `survey.py` to shrink the
    candidate set (which bytes even move).
-5. **Identify bit position & length.** — `correlate.py` ranks candidate
-   (ID, byte/bitfield, endianness); `bitsearch.py` (phase 2) refines exhaustively.
+5. **Identify bit position & length.** — `correlate.py` ranks candidates;
+   `bitsearch.py` searches arbitrary little-endian start/length combinations and
+   byte-aligned big-endian widths.
 6. **Identify scale & offset.** — `build_dbc.py`: derive **scale first** (match the
    standardized shapes / robust slope), **then offset**. Iterate, do not solve both
    jointly.
@@ -99,7 +105,8 @@ Identify on the sweep, calibrate on the holds. When one run is ambiguous, captur
 **several sweeps with different excitation** (slow vs vigorous, different
 axes/conditions) and require the same field to win across them — a field that only wins
 under one specific motion is suspect. (Discrete-state signals — lock/gear/wiper — need
-only a holds run; there is nothing to sweep.)
+only a Holds run; there is nothing to sweep. A truly momentary event that cannot
+be held uses `annotate.py --mode discrete` instead.)
 
 ## Calibrate against known physics, validate against motion
 

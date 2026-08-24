@@ -818,9 +818,12 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  opendbc_reference.py --corpus /data/opendbc-corpus "
+            "  .venv/bin/python "
+            ".agents/skills/can-reverse-engineering/scripts/opendbc_reference.py "
+            "--corpus /data/opendbc-corpus "
             "--out-dir /data/opendbc-reference\n"
-            f"  {CORPUS_ENV}=/data/opendbc-corpus opendbc_reference.py "
+            f"  {CORPUS_ENV}=/data/opendbc-corpus .venv/bin/python "
+            ".agents/skills/can-reverse-engineering/scripts/opendbc_reference.py "
             "--out-dir /data/opendbc-reference"
         ),
     )

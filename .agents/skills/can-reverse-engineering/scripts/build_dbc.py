@@ -11,7 +11,8 @@ then offset"):
 For a discrete signal pass --scale 1 --offset 0 to skip the fit.
 
 Example:
-    python build_dbc.py --trace temp-output/trace_run.csv \
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/build_dbc.py \
+        --trace temp-output/trace_run.csv \
         --sidecar temp-output/sidecar_run.csv \
         --id 0x123 --byte 1 --width 2 --order little --lag 0.2 \
         --name VehicleSpeed --unit km/h
@@ -28,6 +29,12 @@ from scipy import stats
 import common
 
 MAX_FIT_POINTS = 3000
+PYTHON_CMD = (
+    r".venv\Scripts\python.exe"
+    if sys.platform == "win32"
+    else ".venv/bin/python"
+)
+SCRIPT_DIR = ".agents/skills/can-reverse-engineering/scripts"
 
 
 def fit_scale_offset(raw: np.ndarray, ref: np.ndarray):
@@ -288,7 +295,7 @@ def main() -> int:
     out.write_text(db.as_dbc_string(), encoding="utf-8", newline="")
     print(f"\nWrote {out}  (signal '{args.name}', range "
           f"{pmin:.6g}..{pmax:.6g} {args.unit})")
-    print(f"Next: verify.py --trace {args.trace} --dbc {out}"
+    print(f"Next: {PYTHON_CMD} {SCRIPT_DIR}/verify.py --trace {args.trace} --dbc {out}"
           + (f" --sidecar {args.sidecar}" if args.sidecar else ""))
 
     if not args.no_plots and ref_at_frames is not None:

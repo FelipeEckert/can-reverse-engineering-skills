@@ -13,8 +13,10 @@ Modes:
                UP/DOWN = +/-1 step,  PGUP/PGDN = +/-10 step,  q = quit.
 
 Examples:
-    python annotate.py --mode discrete   --label run
-    python annotate.py --mode continuous --label run --unit km/h --min 0 --max 150
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/annotate.py \
+        --mode discrete --label run
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/annotate.py \
+        --mode continuous --label run --unit km/h --min 0 --max 150
 """
 from __future__ import annotations
 

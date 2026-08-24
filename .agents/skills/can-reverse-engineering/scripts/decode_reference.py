@@ -20,10 +20,12 @@ directly; CANedge users must first convert MF4 externally with mdf2csv.
 
 Examples:
     # 1) list the reference signals decodable from this log (forgot which?):
-    python decode_reference.py --trace log.csv --dbc OBD.dbc
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/decode_reference.py \
+        --trace log.csv --dbc OBD.dbc
     # 2) decode one into a sidecar + verification plot:
-    python decode_reference.py --trace log.csv --dbc OBD.dbc --signal speed \
-        --label speed_ref --out temp-output/sidecar_speed_ref.csv
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/decode_reference.py \
+        --trace log.csv --dbc OBD.dbc --signal speed --label speed_ref \
+        --out temp-output/sidecar_speed_ref.csv
 """
 from __future__ import annotations
 
@@ -39,6 +41,14 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 import cantools  # noqa: E402
 import common  # noqa: E402
+
+
+PYTHON_CMD = (
+    r".venv\Scripts\python.exe"
+    if sys.platform == "win32"
+    else ".venv/bin/python"
+)
+SCRIPT_DIR = ".agents/skills/can-reverse-engineering/scripts"
 
 
 def _num(x):
@@ -234,8 +244,10 @@ def main() -> int:
 
     print(f"\nNext: search the RAW bus, EXCLUDING the reference source so it can't "
           f"self-match:\n"
-          f"  python scripts/survey.py --trace {args.trace} --exclude-ids {src}\n"
-          f"  python scripts/correlate.py --trace {args.trace} --sidecar {out} "
+          f"  {PYTHON_CMD} {SCRIPT_DIR}/survey.py --trace {args.trace} "
+          f"--exclude-ids {src}\n"
+          f"  {PYTHON_CMD} {SCRIPT_DIR}/correlate.py --trace {args.trace} "
+          f"--sidecar {out} "
           f"--type continuous --exclude-ids {src}")
     return 0
 

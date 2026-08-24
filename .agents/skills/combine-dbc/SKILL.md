@@ -25,12 +25,14 @@ inside the files use the plain/underscored form (hyphens aren't valid there).
 ## Environment — run from the project venv
 
 This script needs `cantools`, installed in the repo's project-local virtual
-environment at `.venv/` (built from `requirements.txt`). **In the commands below,
-`python` means the venv interpreter** — `.venv\Scripts\python.exe` (Windows) or
-`.venv/bin/python` (macOS / Linux), not the system Python. If `.venv/` does not
-exist yet, **stop and ask the user to run the one-time setup**: `install.bat`
-(Windows) or `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
-(macOS / Linux).
+environment at `.venv/`. The smaller `requirements-core.txt` dependency group is
+sufficient for `combine-dbc`; `requirements.txt` also includes it as part of the
+full installation. **In the commands below, `python` means the venv interpreter**
+— `.venv\Scripts\python.exe` (Windows) or `.venv/bin/python` (macOS / Linux), not
+the system Python. If `.venv/` does not exist yet, **stop and ask the user to run
+the one-time setup**: `install.bat` (Windows, full installation) or
+`python3 -m venv .venv && .venv/bin/pip install -r requirements-core.txt`
+(macOS / Linux, core installation).
 
 ## Usage
 
@@ -38,7 +40,7 @@ Combine every confirmed signal for an application (auto-scans `*/*.dbc`, one
 folder level down, which excludes the combined file itself):
 
 ```
-python .agents/skills/combine-dbc/scripts/combine_dbc.py --app sensor-to-can
+.venv/bin/python .agents/skills/combine-dbc/scripts/combine_dbc.py --app sensor-to-can
 # -> decoding-output/sensor-to-can/sensor-to-can.dbc
 ```
 

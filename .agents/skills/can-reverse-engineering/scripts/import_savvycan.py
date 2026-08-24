@@ -14,7 +14,8 @@ set to 0 because this adapter accepts classical CAN payloads only. RTR is also
 set to 0, so remote-frame status cannot be recovered from this CSV format.
 
 Example:
-    python import_savvycan.py --trace savvycan.csv --out temp-output/trace.csv
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/import_savvycan.py \
+        --trace savvycan.csv --out temp-output/trace.csv
 """
 from __future__ import annotations
 

@@ -19,9 +19,12 @@ Reads device + bit-rate from temp-output/bus.json (run detect_bus.py first), or
 takes them as flags.
 
 Examples:
-    python capture.py --duration 15 --label baseline
-    python capture.py --duration 60 --label run --ids 0x123,0x200
-    python capture.py --duration 15 --label sniff --listen-only   # force silent
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
+        --duration 15 --label baseline
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
+        --duration 60 --label run --ids 0x123,0x200
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
+        --duration 15 --label sniff --listen-only   # force silent
 """
 from __future__ import annotations
 

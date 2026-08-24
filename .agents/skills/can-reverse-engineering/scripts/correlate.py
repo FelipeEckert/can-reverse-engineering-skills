@@ -13,9 +13,11 @@ Human input is imperfect, so scoring is robust to it:
   * coverage flag - candidates / segments with thin overlap are flagged.
 
 Examples:
-    python correlate.py --trace temp-output/trace_run.csv \
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/correlate.py \
+        --trace temp-output/trace_run.csv \
         --sidecar temp-output/sidecar_run.csv --type continuous
-    python correlate.py --trace temp-output/trace_run.csv \
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/correlate.py \
+        --trace temp-output/trace_run.csv \
         --sidecar temp-output/sidecar_run.csv --type discrete
 """
 from __future__ import annotations
@@ -30,6 +32,13 @@ import numpy as np
 import common
 from common import (GRID_HZ, LAG_WINDOW_S, LAG_STEPS, N_WINDOWS,  # noqa: F401
                     _windowed_spearman, _windowed_spearman_signed, plausibility)
+
+PYTHON_CMD = (
+    r".venv\Scripts\python.exe"
+    if sys.platform == "win32"
+    else ".venv/bin/python"
+)
+SCRIPT_DIR = ".agents/skills/can-reverse-engineering/scripts"
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +344,8 @@ def main() -> int:
                   f"bitsearch.")
         print(f"\nBest: ID 0x{b['id_hex']} byte {b['byte']} width {b['width']} "
               f"{b['order']}-endian signed={b['signed']} (score {b['score']}, "
-              f"lag {b['lag_s']}s)\nNext: build_dbc.py --id 0x{b['id_hex']} "
+              f"lag {b['lag_s']}s)\nNext: {PYTHON_CMD} {SCRIPT_DIR}/build_dbc.py "
+              f"--id 0x{b['id_hex']} "
               f"--byte {b['byte']} --width {b['width']} --order {b['order']} "
               f"--lag {b['lag_s']}" + (" --signed" if b['signed'] else ""))
     return 0

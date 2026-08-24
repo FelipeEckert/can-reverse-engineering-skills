@@ -18,10 +18,14 @@ Bit-rate probing is always listen_only regardless (you can't ACK while cycling
 candidate rates); the profile only affects later capture connections.
 
 Examples:
-    python detect_bus.py --profile vehicle        # car/truck (silent)
-    python detect_bus.py --profile bench          # single ECU/sensor on a desk
-    python detect_bus.py --device usb --channel 1 --profile bench
-    python detect_bus.py --bitrate 1000000 --profile vehicle   # skip probing
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/detect_bus.py \
+        --profile vehicle                          # car/truck (silent)
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/detect_bus.py \
+        --profile bench                            # single ECU/sensor on a desk
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/detect_bus.py \
+        --device usb --channel 1 --profile bench
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/detect_bus.py \
+        --bitrate 1000000 --profile vehicle        # skip probing
 """
 from __future__ import annotations
 

@@ -2,7 +2,8 @@
 
 How raw bits in a CAN payload map to a physical value, and how that maps to a
 cantools/DBC `Signal`. The skill's extraction must agree with cantools exactly —
-`python scripts/common.py --selftest` checks this.
+`.venv/bin/python .agents/skills/can-reverse-engineering/scripts/common.py --selftest`
+checks this when run from the repository root.
 
 ## Physical value formula
 

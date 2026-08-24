@@ -1,10 +1,11 @@
 """
 bitsearch.py - canonical bit-level identification of a continuous signal field.
 
-This is the AUTHORITATIVE permutation search: for a single ID it scans every
-(start_bit x length x endianness x sign) candidate against the human reference
-AND a reference-free physical-plausibility check, then reports the most likely
-field with a transparent decision summary (which permutation won, and why).
+This is the AUTHORITATIVE permutation search: for a single ID it scans arbitrary
+little-endian start-bit/length/sign candidates and byte-aligned big-endian
+offset/width/sign candidates against the human reference AND a reference-free
+physical-plausibility check, then reports the most likely field with a transparent
+decision summary (which permutation won, and why).
 
   * little-endian: every start x every length in [min..max] bits, restricted to
     candidates whose BOUNDARY bits actually change - so we don't grab a constant
@@ -28,7 +29,8 @@ Ranking (overlapping candidates are clustered; the best representative is kept):
   5. tidiness                      - OEM byte-aligned/standard-width tie-break.
 
 Example:
-    python bitsearch.py --trace temp-output/trace_run.csv \
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/bitsearch.py \
+        --trace temp-output/trace_run.csv \
         --sidecar temp-output/sidecar_run.csv --id 0x123 --lag 0.2
 """
 from __future__ import annotations
@@ -43,6 +45,13 @@ import numpy as np
 import common
 from common import (GRID_HZ, N_WINDOWS, _windowed_spearman,
                     _windowed_spearman_signed, plausibility, scale_plausibility)
+
+PYTHON_CMD = (
+    r".venv\Scripts\python.exe"
+    if sys.platform == "win32"
+    else ".venv/bin/python"
+)
+SCRIPT_DIR = ".agents/skills/can-reverse-engineering/scripts"
 
 
 # Lag-aligned linear fit  ref ~ offset + scale*raw  -> (scale, offset, r2).
@@ -490,7 +499,8 @@ def main() -> int:
         geom = f"--order big --byte {w['byte']} --width {w['width']}"
         print(f"Best (Motorola): byte {w['byte']} width {w['width']} "
               f"R^2 {w['r2']} plaus {w['plaus']}")
-    print(f"Next: build_dbc.py --id 0x{w['id_hex']} {geom} --lag {w['lag_s']}{sgn} "
+    print(f"Next: {PYTHON_CMD} {SCRIPT_DIR}/build_dbc.py --id 0x{w['id_hex']} "
+          f"{geom} --lag {w['lag_s']}{sgn} "
           f"--trace {args.trace} --sidecar {args.sidecar} --name MySignal")
     return 0
 

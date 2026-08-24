@@ -22,8 +22,9 @@ WHICH field and HOW WIDE - absolute calibration comes from the holds run.
 
 Recommended live flow: capture a HOLDS run AND a SWEEP run, identify on the sweep,
 calibrate on the holds. (When a machine reference exists in a recorded log - OBD2 /
-GPS-to-CAN - prefer the OFFLINE workflow instead. The headless annotate.py
---mode event/continuous + correlate --type discrete paths still exist as fallbacks.)
+GPS-to-CAN - prefer the OFFLINE workflow instead. For headless collection,
+annotate.py --mode continuous is the sweep fallback; use --mode discrete with
+correlate --type discrete only for a truly momentary event that cannot be held.)
 
 PER-RUN FILES: each Start opens a NEW numbered pair trace_<label>_<N>.csv +
 sidecar_<label>_<N>.csv (sidecar truncated fresh), so trace and sidecar always
@@ -37,7 +38,8 @@ reference. Capture uses the silent/ACK mode from bus.json (vehicle->silent,
 bench->ACK); override with --listen-only / --normal.
 
 Example:
-    python flask_sync.py --unit m/s^2 --min -9.81 --max 9.81 \
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/flask_sync.py \
+        --unit m/s^2 --min -9.81 --max 9.81 \
         --states 3 --state-values "-9.81,0,9.81"
     # open http://127.0.0.1:5000 -> Start, park/hold/tag each value, Stop
 """

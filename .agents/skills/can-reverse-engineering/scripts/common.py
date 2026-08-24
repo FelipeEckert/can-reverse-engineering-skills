@@ -1,5 +1,5 @@
 """
-Shared helpers for the cansub-reverse-engineering skill.
+Shared helpers for the can-reverse-engineering skill.
 
 Covers: CANsub discovery, passive bit-rate probing, webCAN-CSV trace loading,
 per-ID frame grouping, vectorized bitfield extraction (little-/big-endian),
@@ -7,7 +7,8 @@ cantools single-signal DBC mapping, and sidecar-reference loading.
 
 All bus access here is passive (listen_only=True) — nothing is transmitted.
 
-Run `python common.py --selftest` to validate bitfield extraction against
+Run `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/common.py
+--selftest` from the repository root to validate bitfield extraction against
 cantools without any hardware.
 """
 from __future__ import annotations

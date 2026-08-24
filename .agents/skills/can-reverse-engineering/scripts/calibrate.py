@@ -13,7 +13,8 @@ absolute scale than fitting a hand-driven ramp - use it to fix endpoints (e.g.
 Two ways to supply anchors (use exactly one):
 
   A) --point PHYS=TRACE  (repeatable): each anchor is a separate steady capture.
-     python calibrate.py --id 0x2 --byte 0 --width 2 --order little \
+     .venv/bin/python .agents/skills/can-reverse-engineering/scripts/calibrate.py \
+         --id 0x2 --byte 0 --width 2 --order little \
          --point 0=temp-output/trace_cal0.csv \
          --point 100=temp-output/trace_cal100.csv \
          --name gauge1 --unit % --out decoding-output/sensor-to-can/gauge1/gauge1.dbc
@@ -22,7 +23,8 @@ Two ways to supply anchors (use exactly one):
      the flask "states" widget (kind="anchor" rows). For each tag the steady raw
      is read from a window of the trace (default: the seconds just BEFORE the tag,
      since you move-then-tag).
-     python calibrate.py --id 0x2 --byte 0 --width 2 --order little \
+     .venv/bin/python .agents/skills/can-reverse-engineering/scripts/calibrate.py \
+         --id 0x2 --byte 0 --width 2 --order little \
          --trace temp-output/trace_run.csv --sidecar temp-output/sidecar_run.csv \
          --window 2 --name gauge1 --unit % \
          --out decoding-output/sensor-to-can/gauge1/gauge1.dbc

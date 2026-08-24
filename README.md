@@ -1,116 +1,290 @@
-# CAN bus reverse engineering skills
+# CAN bus reverse engineering skills for Codex
 
-This repo contains [Claude Code](https://www.claude.com/claude-code) skills that help you reverse engineer raw CAN bus data into decoding rules stored as DBC files. 
+This repository provides Codex skills and deterministic Python tools for turning
+recorded raw CAN or CAN FD traffic into verified DBC signal definitions. The
+workflow helps locate the CAN ID and bit field for a physical value, determine
+byte order, signedness, scale, and offset, and verify the result before it is
+accepted.
 
-Specifically, the skills help you leverage AI/LLM tools like Claude Code and [python-can](https://www.csselectronics.com/pages/python-can-usb-serial-api-stream) scripts to identify which CAN ID and data bits encode a
-real-world value (speed, RPM, state of charge, ...), work out its start bit,
-length, endianness, scale and offset, and verify the result. 
+This is a **Codex-oriented port and evolution** of the original CAN
+reverse-engineering skills from [CSS Electronics](https://www.csselectronics.com).
+The original project, methodology, bundled reference databases, and CANsub
+integration remain clearly attributed to CSS Electronics.
 
-The skills assume that you are using a [CANsub](https://www.csselectronics.com/products/can-fd-usb-interface-ethernet-cansub-2) CAN bus interface from [CSS Electronics](https://www.csselectronics.com) to either record CSV log files via e.g. the [webCAN](https://www.csselectronics.com/pages/webcan-can-bus-streaming-software-browser) tool, or stream data in real-time via USB/Ethernet.
+- **`.agents/` is the maintained Codex implementation.** It contains the current
+  skills, scripts, references, and assets.
+- **`.claude/` is preserved legacy/original reference.** It is not the maintained
+  implementation and is not kept synchronized with `.agents/`.
 
-The repo bundles three skills (auto-discovered when you open the folder in Claude
-Code):
+The maintained Codex skills are:
 
-- **cansub-reverse-engineering** - the workflow
-- **combine-dbc** - merge per-signal DBCs into one
-- **cansub-knowledge** - CANsub specs / API reference
+- **`can-reverse-engineering`** — survey, candidate analysis, correlation,
+  bit-field search, DBC generation, and verification.
+- **`combine-dbc`** — combine confirmed per-signal DBC files into one
+  application-level DBC.
 
-<br>
+This is an analysis workflow rather than a turnkey vehicle decoder. A
+reference-free result is a hypothesis to investigate, not a confirmed signal;
+shipping a DBC definition still requires independent evidence and verification.
 
-**Note:** This is not a 'polished tool', but an illustration of how you can use the CANsub + Python + AI for CAN sniffing
+## What works offline
 
-**Note:** We strongly recommend reading our related article [CAN bus reverse engineering with AI](https://www.csselectronics.com/pages/can-bus-reverse-engineering-ai-llm-claude).
+After Python dependencies have been installed, the core workflow runs locally
+without CAN hardware or internet access. It supports:
 
-[![Watch the CAN bus reverse engineering demo](docs/vision-reference-demo.png)](https://cdn.shopify.com/videos/c/o/v/e384c5a75b7943e681dcbad2d10e230a.mp4)
+- Validation and analysis of normalized CAN/CAN FD CSV logs.
+- Import of classical-CAN SavvyCAN/GVRET CSV logs into the normalized format.
+- Bus survey, changing-bit analysis, counter/checksum hints, and candidate
+  profiling.
+- Reference-free candidate ordering and physical encoding hypotheses.
+- Decoding an OBD2, GPS, or other machine reference from the same log when a DBC
+  is available, followed by correlation, bit search, calibration, and verification.
+- Building single-signal DBC files and combining them with `combine-dbc`.
+- Optional local opendbc corpus indexing and exact-precedent annotation.
+- Optional local video/OCR reference extraction and review.
 
+Reference-free analysis deliberately stops short of claiming that a candidate is
+speed, RPM, temperature, or another physical signal. It ranks fields for
+investigation and enumerates plausible interpretations. Use a known physical
+state, a decoded on-bus reference, or another independent measurement to confirm
+geometry and calibration.
 
-## Recommended hardware
+## Offline quickstart
 
-- A [CANsub.2](https://www.csselectronics.com/products/can-fd-usb-interface-ethernet-cansub-2) CAN FD interface with USB/Ethernet
-- An [OBD2-DB9 adapter cable](https://www.csselectronics.com/products/obd2-db9-adapter-cable) (and optionally a [contactless adapter](https://www.csselectronics.com/products/contactless-can-bus-reader-adapter))
+Run these commands from the repository root. Python 3.10 or newer is required.
+The example assumes that `path/to/log.csv` is already in the normalized format
+described below.
 
-<img src="https://www.csselectronics.com/cdn/shop/files/CANsub-can-bus-interface-stream-real-time-webcan.png" alt="CANsub CAN bus interface streaming real-time in webCAN" width="25%"> <img src="https://www.csselectronics.com/cdn/shop/products/OBD2-DB9-Adapter-Cable-CAN-Bus.jpg?v=1625644186" alt="OBD2-DB9 adapter cable" width="20%">
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-core.txt
 
-## 1. Get the code and install dependencies
+.venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py \
+  --trace path/to/log.csv \
+  --json temp-output/survey_log.json
 
-1. **Clone the repo** (or download the ZIP from GitHub and extract it)
-2. **Install Python** - [Python 3.10+](https://www.python.org/downloads/); on Windows, tick **"Add python.exe to PATH"**. Verify: `python --version`
-3. **Install the dependencies** into a local virtual environment (`.venv`) so your system Python stays untouched. The default remains the full installation:
-   - **Windows:** double-click **`install.bat`** (or run `install.bat` in a terminal)
-   - **macOS / Linux:** `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+.venv/bin/python .agents/skills/can-reverse-engineering/scripts/candidate_profiler.py \
+  --trace path/to/log.csv \
+  --survey temp-output/survey_log.json \
+  --out temp-output/candidate-analysis/candidate-ranking.json
 
-   Smaller, self-contained feature sets are also available: use
-   `requirements-core.txt` for normalized-CSV offline analysis and `combine-dbc`,
-   `requirements-live.txt` for live CANsub capture, or `requirements-vision.txt`
-   for video/OCR references. The vision workflow additionally requires
-   **FFmpeg's `ffprobe` executable on `PATH`**; install FFmpeg separately for your
-   operating system because pip does not provide that executable.
-
-   This repository does **not** import CANedge MF4 files directly. Convert MF4
-   externally to normalized webCAN CSV with a tool such as `mdf2csv`, then use the
-   converted CSV with the offline workflow.
-
-## 2. Set up Claude Code
-
-The below is our recommended setup for new Claude Code users:
-
-1. **Get a [Claude subscription](https://claude.ai)** - Claude Code is included with [Claude Pro / Max](https://www.claude.com/claude-code) (or API billing)
-2. **Install [Visual Studio Code](https://code.visualstudio.com)**
-3. **Install the Claude Code extension** - Extensions panel (`Ctrl+Shift+X`), search **"Claude Code"**, install, sign in
-4. **Open this folder** - *File → Open Folder…* → the cloned repo; skills in `.claude/skills/` load automatically
-
-## 3. Connect the hardware
-
-Plug the CANsub into your computer (USB) and into the vehicle's OBD2 port using the
-OBD2-DB9 adapter cable. Start the engine (or set the ignition on) so there's live
-CAN traffic to capture. We recommend verifying via [webCAN](https://www.csselectronics.com/pages/webcan-can-bus-streaming-software-browser) that you can stream raw proprietary CAN bus data before proceeding. If not, consider our [contactless CAN reader](https://www.csselectronics.com/products/contactless-can-bus-reader-adapter). 
-
-## Try it
-
-Open the Claude Code panel in VS Code and ask, for example:
-
-> I've connected my CANsub to my car via the OBD2-DB9 cable. Help me check if there is live proprietary CAN data available - and then help me reverse engineer my door locks
-
-> Reverse engineer Speed and RPM from the proprietary CAN data found in Mercedes-E350-2010-obd2-can.csv (contains OBD2 reference data).
-
-> I have a CANedge log with proprietary vehicle CAN data plus the CANedge's internal GPS/IMU on CAN9 (or a CANmod.gps GPS-to-CAN module). Use the GPS speed as the reference to reverse engineer the proprietary vehicle speed
-
-> Help me reverse engineer Speed from my Opel Astra. I have put the raw CAN data in opel/ along with a video of the speed from my car's dashboard.
-
-> I have a gauge-to-CAN module with 8 gauges connected to my CANsub - help me reverse engineer the 1st gauge position signal.
-
-
-**Note:** You can use our [CANsub CAN+OBD2 sample data](https://www.csselectronics.com/pages/ai-can-bus-sniffer-data-pack) to test the skill
-
-**Note:** You should NOT attach a CSV as an attachment to Claude - it'll attempt to load possibly millions of raw CAN frames into the context window. Instead reference the CSV file path
-
-
-## Output structure and combining DBCs
-
-Each confirmed signal is saved under `decoding-output/`, grouped by application
-(the system under test) and signal:
-
+.venv/bin/python .agents/skills/can-reverse-engineering/scripts/physical_hypotheses.py \
+  --candidates temp-output/candidate-analysis/candidate-ranking.json \
+  --out temp-output/physical-hypotheses.json
 ```
+
+On Windows, `install.bat` creates `.venv` and installs the full dependency set.
+For a smaller core-only Windows environment, use:
+
+```bat
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-core.txt
+```
+
+Open the cloned repository in Codex, or launch Codex from the repository root or
+a directory below it. Codex scans `.agents/skills/` from the current working
+directory upward through the repository root, so the maintained skills are
+available without copying them elsewhere. See the
+[official skill documentation](https://learn.chatgpt.com/docs/build-skills).
+
+Example prompts:
+
+> Survey `path/to/log.csv` and rank reference-free CAN signal candidates. Treat all physical interpretations as hypotheses.
+
+> Reverse engineer vehicle speed from `trip.csv`. It contains an OBD2 speed reference on the same bus.
+
+> Import `savvycan.csv`, preserve the original, and survey the normalized result.
+
+> Combine the confirmed DBCs for `mercedes-e350` into one application DBC.
+
+Reference large logs by file path rather than pasting or attaching their contents
+to the conversation.
+
+## Input formats
+
+### Normalized CSV
+
+The analysis pipeline consumes a semicolon-delimited, 12-column format compatible
+with webCAN and `python-can-cansub` capture output:
+
+```text
+TimestampEpoch;BusChannel;ID;IDE;DLC;DataLength;Dir;EDL;BRS;ESI;RTR;DataBytes
+```
+
+These columns must appear first and in this order. Uniquely named trailing
+annotation columns are accepted and ignored. Frames are validated strictly;
+timestamps must be non-negative and monotonically non-decreasing. The loader does
+not sort or repair malformed traces.
+
+### SavvyCAN/GVRET CSV
+
+The repository imports the common 14-column classical-CAN SavvyCAN/GVRET format:
+
+```text
+Time Stamp,ID,Extended,Dir,Bus,LEN,D1,D2,D3,D4,D5,D6,D7,D8
+```
+
+Convert it without overwriting the source:
+
+```bash
+.venv/bin/python .agents/skills/can-reverse-engineering/scripts/import_savvycan.py \
+  --trace path/to/savvycan.csv \
+  --out temp-output/trace_savvycan_normalized.csv
+```
+
+This importer supports classical CAN payloads up to 8 bytes. The source format
+does not carry CAN FD flags or recoverable RTR metadata, so it is not a general
+CAN FD importer. SavvyCAN timestamps remain relative, converted from microseconds
+to seconds; workflows that require an absolute clock, particularly video
+alignment, need an independently established time anchor.
+
+### CANedge MF4
+
+Direct MF4 import is **not implemented**. Convert CANedge MF4 externally to the
+normalized CSV format, for example with `mdf2csv`, and analyze the converted CSV.
+The converter is not bundled or installed by this repository.
+
+CANedge recordings can still provide excellent machine references after
+conversion. The maintained skill bundles DBCs for CANedge internal GPS/IMU on
+CAN9, CANmod.gps, and standard OBD2 references.
+
+## Installation options
+
+All Python dependencies are installed into the repository-local `.venv`.
+
+| File | Includes | Use it for |
+| --- | --- | --- |
+| `requirements-core.txt` | `cantools`, NumPy, pandas, SciPy, matplotlib | Normalized-CSV analysis, SavvyCAN import, reference-free analysis, DBC-reference workflows, and `combine-dbc` |
+| `requirements-live.txt` | Core plus `python-can`, `python-can-cansub`, Flask, requests | Live CANsub capture and the human-reference web UI |
+| `requirements-vision.txt` | Core plus Flask, RapidOCR, ONNX Runtime, OpenCV | Local video/OCR reference extraction and review |
+| `requirements.txt` | Live plus vision | Full installation of every maintained workflow |
+
+Each feature-specific file is self-contained: live and vision both include core.
+The full macOS/Linux installation is:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+The vision workflow additionally requires the external FFmpeg **`ffprobe`**
+executable on `PATH`. FFmpeg is an operating-system dependency and is not
+installed by pip. If `ffprobe` cannot supply a usable video timestamp, the vision
+tool requires an explicit `--start-epoch` or another documented time anchor.
+
+## Optional opendbc reference support
+
+Opendbc is optional. Core candidate ordering and physical-hypothesis generation
+work without it. When configured, a local opendbc checkout can be organized into
+a read-only corpus and indexed so hypotheses can report exact encoding precedent:
+
+```bash
+.venv/bin/python .agents/skills/can-reverse-engineering/scripts/setup_opendbc_corpus.py \
+  --opendbc-root /path/to/opendbc \
+  --corpus-out /path/to/opendbc-corpus
+
+.venv/bin/python .agents/skills/can-reverse-engineering/scripts/opendbc_reference.py \
+  --corpus /path/to/opendbc-corpus \
+  --out-dir /path/to/opendbc-reference
+```
+
+Pass the generated `signals.tsv` to `physical_hypotheses.py` with
+`--opendbc-signals`. Corpus matches are supporting precedent only: they do not
+change candidate ordering, confirm a signal, or replace verification.
+
+## Live capture: current support and limits
+
+Live capture currently supports **CANsub only**, through
+`python-can-cansub`, over USB or Ethernet. The live workflow can discover a
+CANsub via mDNS, probe common classical CAN/CAN FD bit rates passively, record a
+normalized trace, and collect a synchronized human reference through a local
+Flask UI.
+
+**SocketCAN and ETAS live backends are not implemented yet.** Installing
+`python-can` does not make other python-can interfaces available to these capture
+scripts because device discovery, timing, and health checks are currently
+CANsub-specific. Existing logs from other interfaces remain usable after they
+are converted to the normalized CSV contract.
+
+The live scripts never transmit CAN data frames. The default `vehicle` profile is
+silent/listen-only; the explicit `bench` profile allows the CANsub to acknowledge
+frames from a single-node bench setup. Do not have a driver operate the reference
+UI while driving—use a passenger/operator or a controlled test setup.
+
+For CANsub live capture, typical hardware is:
+
+- A [CANsub.2](https://www.csselectronics.com/products/can-fd-usb-interface-ethernet-cansub-2) CAN FD interface.
+- An [OBD2-DB9 adapter cable](https://www.csselectronics.com/products/obd2-db9-adapter-cable), with an optional [contactless CAN reader](https://www.csselectronics.com/products/contactless-can-bus-reader-adapter).
+
+## Output structure and combine-dbc
+
+Confirmed signals are stored separately so each result retains its DBC,
+verification plot, and analysis evidence:
+
+```text
 decoding-output/
-  <application>/                         e.g. mercedes-e350/
-    <signal>/<signal>.dbc                e.g. engine-rpm/engine-rpm.dbc   (one DBC per signal)
-    <signal>/<signal>.png                the verify plot (decoded vs reference)
-    <signal>/analysis-plots/             survey / correlate / bit-search / fit plots
-    <application>.dbc                     the combined DBC across all signals
+  <application>/
+    <signal>/<signal>.dbc
+    <signal>/<signal>.png
+    <signal>/analysis-plots/
+    <application>.dbc
 ```
 
-If you've decoded several signals, ask Claude to merge them into one
-application DBC (using the **combine-dbc** skill):
+Combine all confirmed signals for an application with the `combine-dbc` skill or
+run its deterministic script directly:
 
-> Combine the decoded DBCs for mercedes-e350 into a single DBC.
+```bash
+.venv/bin/python .agents/skills/combine-dbc/scripts/combine_dbc.py \
+  --app mercedes-e350
+```
 
-This produces `decoding-output/<application>/<application>.dbc`. You can load
-this combined DBC in [webCAN](https://www.csselectronics.com/pages/webcan-can-bus-streaming-software-browser)
-and stream live from your CANsub to see your reverse-engineered signals decoded in
-real time - a final, live confirmation of the results.
+This writes `decoding-output/mercedes-e350/mercedes-e350.dbc`. It is safe to
+re-run as more per-signal DBCs are confirmed.
 
-## License and attribution
+## Current signal-decoding scope
 
-These skills are fully open source under the [MIT License](LICENSE) - you are free to use, modify and distribute them in your own projects.
+- Classical CAN and CAN FD normalized traces are supported.
+- Target signals are plain and non-multiplexed. Target-side J1939 PGN logic,
+  ISO-TP/transport reassembly, and multiplexor discovery are not implemented.
+- A multiplexed reference DBC, such as OBD2, is supported because `cantools`
+  decodes the reference before target-field analysis.
+- Arbitrary bit-packed little-endian fields are searched. Big-endian candidate
+  search is currently limited to byte-aligned fields.
+- Verification is a gate. An unconfirmed candidate should not be presented as a
+  decoded signal merely because it correlates or resembles an OEM convention.
 
-If you use them in your projects, videos or blog posts, we'd appreciate a reference to our article: [CAN bus reverse engineering with AI](https://www.csselectronics.com/pages/can-bus-reverse-engineering-ai-llm-claude).
+## Repository structure
+
+```text
+.agents/skills/can-reverse-engineering/   maintained Codex workflow
+.agents/skills/combine-dbc/               maintained DBC-combine workflow
+.claude/                                  preserved legacy/original reference
+docs/                                     public documentation assets
+requirements-core.txt                     offline/core dependency group
+requirements-live.txt                     live CANsub dependency group
+requirements-vision.txt                   local vision dependency group
+requirements.txt                          full dependency set
+install.bat                               full Windows setup
+```
+
+Generated work belongs at the repository root under `temp-output/` and confirmed
+deliverables under `decoding-output/`; do not run the workflow from inside a
+skill directory.
+
+## CSS Electronics attribution and license
+
+This Codex-oriented port/evolution is based on the original CSS Electronics CAN
+reverse-engineering skills and methodology. The preserved `.claude/` tree records
+that original/legacy implementation; the current maintained implementation is in
+`.agents/`.
+
+For the original methodology, sample data, and demonstration, see:
+
+- [CAN bus reverse engineering with AI](https://www.csselectronics.com/pages/can-bus-reverse-engineering-ai-llm-claude)
+- [CANsub CAN + OBD2 sample data](https://www.csselectronics.com/pages/ai-can-bus-sniffer-data-pack)
+
+[![Original CSS Electronics CAN reverse-engineering demonstration](docs/vision-reference-demo.png)](https://cdn.shopify.com/videos/c/o/v/e384c5a75b7943e681dcbad2d10e230a.mp4)
+
+The repository is available under the [MIT License](LICENSE). Preserve the
+license notice and CSS Electronics attribution when redistributing or adapting
+the project.

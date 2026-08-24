@@ -6,7 +6,8 @@ project file if needed. Signals on the same frame id are combined into one
 message; a re-merged signal of the same name replaces the old definition.
 
 Example:
-    python merge_dbc.py --into temp-output/project.dbc --add temp-output/VehicleSpeed.dbc
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/merge_dbc.py \
+        --into temp-output/project.dbc --add temp-output/VehicleSpeed.dbc
 """
 from __future__ import annotations
 

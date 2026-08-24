@@ -28,15 +28,19 @@ with --start-epoch / nudge with --time-offset.
 TWO MODES:
   1) Frame-dump - sample a handful of frames spread across the clip so the ASSISTANT can
      inspect them, locate the digit region, and read the unit:
-       python scripts/vision_reference.py --video TEMP/clip.mov --dump-frames 9
+       .venv/bin/python .agents/skills/can-reverse-engineering/scripts/vision_reference.py \
+           --video TEMP/clip.mov --dump-frames 9
   2) Extract - OCR the chosen ROI across the clip into a sidecar (+ diagnostics + a
      0-vision-reference.png confirmation plot + a .meta.json for the review app):
-       python scripts/vision_reference.py --video TEMP/clip.mov --roi 680,480,360,150 \
-           --label speed_ref --unit km/h --fps 20
+       .venv/bin/python .agents/skills/can-reverse-engineering/scripts/vision_reference.py \
+           --video TEMP/clip.mov --roi 680,480,360,150 --label speed_ref \
+           --unit km/h --fps 20
 
 Then (just like the offline workflow, but WITHOUT --exclude-ids):
-       python scripts/survey.py --trace <log.csv>
-       python scripts/correlate.py --trace <log.csv> --sidecar temp-output/sidecar_speed_ref.csv \
+       .venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py \
+           --trace <log.csv>
+       .venv/bin/python .agents/skills/can-reverse-engineering/scripts/correlate.py \
+           --trace <log.csv> --sidecar temp-output/sidecar_speed_ref.csv \
            --type continuous --max-lag 2
 """
 from __future__ import annotations
@@ -59,6 +63,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 import common  # noqa: E402  (COLOR_REFERENCE + output conventions)
 
 NUM_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+PYTHON_CMD = (
+    r".venv\Scripts\python.exe"
+    if sys.platform == "win32"
+    else ".venv/bin/python"
+)
+SCRIPT_DIR = ".agents/skills/can-reverse-engineering/scripts"
 
 
 def _parse_iso(ts: str):
@@ -365,9 +375,11 @@ def _finalize(args, samples, sampled, read_ok, start_epoch) -> int:
     # --- Next: guidance (offline workflow, but NO --exclude-ids) -----------
     print(f"\nReview it against the video, then search the RAW bus (off-bus reference, "
           f"so NO --exclude-ids):\n"
-          f"  python scripts/vision_review.py --video {args.video} --sidecar {out}\n"
-          f"  python scripts/survey.py --trace <log.csv>\n"
-          f"  python scripts/correlate.py --trace <log.csv> --sidecar {out} "
+          f"  {PYTHON_CMD} {SCRIPT_DIR}/vision_review.py --video {args.video} "
+          f"--sidecar {out}\n"
+          f"  {PYTHON_CMD} {SCRIPT_DIR}/survey.py --trace <log.csv>\n"
+          f"  {PYTHON_CMD} {SCRIPT_DIR}/correlate.py --trace <log.csv> "
+          f"--sidecar {out} "
           f"--type continuous --max-lag 2")
     return 0
 

@@ -14,7 +14,8 @@ correct, rather than just printing a number. It:
     matching exit code (0 = PASS, 2 = UNCONFIRMED) so it can gate a pipeline.
 
 Example:
-    python verify.py --trace temp-output/trace_run.csv \
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/verify.py \
+        --trace temp-output/trace_run.csv \
         --dbc temp-output/VehicleSpeed.dbc --sidecar temp-output/sidecar_run.csv
 """
 from __future__ import annotations

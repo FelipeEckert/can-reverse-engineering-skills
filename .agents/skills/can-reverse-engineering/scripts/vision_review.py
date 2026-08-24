@@ -11,7 +11,8 @@ BEFORE it feeds the decoder (OCR can misread).
 Reuses the flask_sync.py scaffolding (Flask app + port check + launch) and the vendored,
 offline uPlot in ../assets, and common.load_sidecar() for the CSV.
 
-    python scripts/vision_review.py --video TEMP/clip.mov --sidecar temp-output/sidecar_speed_ref.csv
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/vision_review.py \
+        --video TEMP/clip.mov --sidecar temp-output/sidecar_speed_ref.csv
     # reads temp-output/sidecar_speed_ref.meta.json for the video<->sidecar time mapping
     # open http://127.0.0.1:5001
 """

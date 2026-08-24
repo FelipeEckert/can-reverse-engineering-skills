@@ -17,8 +17,10 @@ likely start) and flags a constant leading bit (e.g. a 'valid' flag) that pushes
 fields off byte boundaries - both hints to seed bitsearch.
 
 Examples:
-    python survey.py --trace temp-output/trace_baseline.csv
-    python survey.py --trace temp-output/trace_baseline.csv --json temp-output/survey.json
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py \
+        --trace temp-output/trace_baseline.csv
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py \
+        --trace temp-output/trace_baseline.csv --json temp-output/survey.json
 """
 from __future__ import annotations
 
