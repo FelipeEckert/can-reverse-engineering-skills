@@ -1,0 +1,7 @@
+# Live CAN/CANsub capture and the human-reference web UI.
+-r requirements-core.txt
+
+python-can>=4.6.0
+python-can-cansub>=2026.6.2
+flask>=3.0
+requests>=2.30

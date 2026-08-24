@@ -1,0 +1,9 @@
+# Video/OCR reference extraction and the mandatory review web UI.
+# FFmpeg/ffprobe is also required on PATH; it is a system executable, not a
+# Python package, so install it separately for your operating system.
+-r requirements-core.txt
+
+flask>=3.0
+rapidocr>=2
+onnxruntime>=1.17
+opencv-python>=4.9

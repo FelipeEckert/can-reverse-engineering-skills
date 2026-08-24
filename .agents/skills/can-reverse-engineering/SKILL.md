@@ -6,9 +6,10 @@ description: >
   real-world value such as speed, RPM, state of charge, temperature, throttle, or
   a discrete state; determine start bit, length, endianness, signedness, scale,
   and offset; or build a DBC from a recorded log. Runs the deterministic survey →
-  correlate → bitsearch → build_dbc → verify workflow. Supports offline CSV, MF4,
-  and CANedge logs with OBD2, GPS, or other DBC-decoded references; live CANsub
-  capture with a human reference; and video-based OCR references. Handles
+  correlate → bitsearch → build_dbc → verify workflow. Supports normalized webCAN
+  CSV and SavvyCAN/GVRET CSV, plus CANedge MF4 after external conversion, with
+  OBD2, GPS, or other DBC-decoded references; live CANsub capture with a human
+  reference; and video-based OCR references. Handles
   classical CAN, CAN FD, and bit-packed fields. Look for named logs in the working
   directory and TEMP before asking the user where they are.
 ---
@@ -197,22 +198,31 @@ new numbered, tagged run pair (below), so this is cheap.
 
 ## Environment — run scripts from the project venv
 
-The scripts need third-party Python packages (cantools, numpy, scipy, pandas,
-matplotlib, and — for live capture — python-can, python-can-cansub, flask,
-requests). They live in a **project-local virtual environment** at `.venv/` at the
-**root of your working directory** (the cwd, alongside `temp-output/` and
-`decoding-output/`), built from `requirements.txt`. **Do not rely on a global
-Python.**
+The scripts use a **project-local virtual environment** at `.venv/` at the root of
+your working directory (the cwd, alongside `temp-output/` and `decoding-output/`).
+Install the dependency set for the workflow you need:
+
+- `requirements-core.txt` — normalized-CSV offline analysis and `combine-dbc`.
+- `requirements-live.txt` — core plus optional live CAN/CANsub capture and Flask UI.
+- `requirements-vision.txt` — core plus optional video/OCR extraction and review UI.
+- `requirements.txt` — backward-compatible full installation (live + vision).
+
+The vision set also requires the **FFmpeg `ffprobe` executable on `PATH`**; it is a
+system prerequisite and is not installed by pip. **Do not rely on a global Python.**
 
 **In every command in this skill, `python` means the venv interpreter:**
 - Windows: `.venv\Scripts\python.exe`
 - macOS / Linux: `.venv/bin/python`
 
-Before running any script, confirm `.venv/` exists. **If it does not, stop and ask
-the user to run the one-time setup** — do not silently fall back to the system
-Python:
+Before running a script, confirm `.venv/` exists and has the matching dependency
+set. **If it does not, stop and ask the user to run the one-time setup** — do not
+silently fall back to the system Python:
 - Windows: run `install.bat` from your working-directory root
 - macOS / Linux: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+
+Those commands install every feature. For offline-only use, replace
+`requirements.txt` with `requirements-core.txt`; install `requirements-live.txt`
+or `requirements-vision.txt` for a self-contained feature environment.
 
 ## CANsub technical reference
 
@@ -677,8 +687,9 @@ confirm the real IDs from a `survey.py` / `decode_reference.py` listing).
 
 The analysis pipeline consumes the normalized **webCAN CSV** format (the
 `python-can-cansub` native format, same 12-column header the live capture writes).
-A **CANedge** user can produce it from an MF4 log with the **mdf2csv** converter
-(see the `process-log-files` skill) and then use this workflow unchanged.
+This repository **does not import MF4 directly**. A CANedge user must first use an
+external converter such as **mdf2csv** to produce normalized webCAN CSV; mdf2csv is
+not bundled or installed by this repository. Then use the converted CSV unchanged.
 
 0. **Locate the log, then detect its format (don't ask — glob).** If the user named the file (e.g.
    `chevy-tahoe-obd2-can-data.csv`) or said "my log/CSV", find `<log.csv>` by
@@ -761,7 +772,10 @@ responsible for the rough time-sync — the standard setup is webCAN streaming t
 
 **Scope (v1):** **numeric / digital readouts only** (a number like `72.5`, `48 km/h`,
 `91 °C`, `100 %`). Analog needle/dial gauges are out of scope. OCR is local
-(RapidOCR / ONNX, no PyTorch) — see the deps note below.
+(RapidOCR / ONNX, no PyTorch) — see the deps note below. Install
+`requirements-vision.txt` and install **FFmpeg separately**, ensuring its `ffprobe`
+executable is on `PATH`. Without `ffprobe`, pass a known `--start-epoch`; the script
+will not create an unaligned epoch-zero sidecar.
 
 **Time base — why this aligns, and the anchor that actually works.** The video's
 capture-start time + each frame's delta give an **absolute epoch per frame**; the webCAN
@@ -798,7 +812,8 @@ then measure the offset and apply it:
    clip and **look at them yourself**:
    `python scripts/vision_reference.py --video <video> --dump-frames 9`
    This writes `temp-output/vision-frames/fNN_t<sec>.png` and prints the duration +
-   `creation_time`. **Read the frames** to (a) read the on-screen **quantity and unit**
+   selected metadata timestamp. **Read the frames** to (a) read the on-screen
+   **quantity and unit**
    and (b) pick the **digit region** `x,y,w,h`. Choose an ROI generous enough to enclose
    the digits at **every** value in the clip (the digit count changes, e.g. `9.7` →
    `100.0`). Do **not** ask the user for the location — determine it from the frames.
@@ -1034,7 +1049,8 @@ is unchanged.
   `0-vision-reference.png` and OCR metrics look excellent** (high mean confidence hides
   per-frame glitches). The PNG/metrics are a preview, not a substitute; that interactive
   visual check is the gate. Numeric/digital readouts only (no analog needle gauges). Needs
-  `rapidocr` + `onnxruntime` + `opencv-python` (in `requirements.txt`).
+  `requirements-vision.txt` plus the FFmpeg `ffprobe` executable on `PATH` (or an
+  explicit `--start-epoch`).
 - Reference material: `references/re-methodology.md` (the manual method this
   automates, plus the gate / multi-run discipline) and
   `references/signal-encoding.md` (bit order, sign, scale/offset, bit-packing,

@@ -15,8 +15,8 @@ the CAN IDs present in the log. cantools handles multiplexed DBCs (e.g. OBD2)
 transparently; there is no protocol-specific logic here. Frames whose ID isn't in
 the DBC are ignored - supply a DBC that covers the IDs you care about.
 
-webCAN CSV is native to python-can-cansub; CANedge users can produce it from an
-MF4 log via the mdf2csv converter.
+webCAN CSV is native to python-can-cansub. This repository does not import MF4
+directly; CANedge users must first convert MF4 externally with mdf2csv.
 
 Examples:
     # 1) list the reference signals decodable from this log (forgot which?):
@@ -95,7 +95,8 @@ def main() -> int:
         print(f"ERROR: could not load '{args.trace}' as a webCAN CSV ({exc}).\n"
               f"This offline workflow expects webCAN format (header "
               f"'TimestampEpoch;BusChannel;ID;IDE;DLC;DataLength;Dir;EDL;BRS;ESI;RTR;"
-              f"DataBytes'). CANedge users: convert MF4->CSV with mdf2csv first.",
+              f"DataBytes'). This repository does not import MF4 directly; CANedge "
+              f"users must convert MF4 externally with mdf2csv first.",
               file=sys.stderr)
         return 1
     db = cantools.database.load_file(args.dbc)

@@ -20,8 +20,6 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-import can
-import cantools
 from trace_validation import (
     NORMALIZED_COLUMNS,
     TraceValidationError,
@@ -75,6 +73,8 @@ AUTO_DETECT_SEQUENCE = [
 
 def make_timing(nominal: int, data: int, sample_point: float = 80.0):
     """Build a CANsub-compatible BitTimingFd from nominal/data rate + sample point."""
+    import can
+
     _register_cansub()
     return can.BitTimingFd.from_sample_point(
         f_clock=CAN_F_CLOCK,
@@ -93,6 +93,8 @@ def detect_configs(device: str | None = None) -> list[dict]:
     If `device` is given, keep only channels whose hostname contains it
     (e.g. the 8-char device id, or 'usb' / 'eth').
     """
+    import can
+
     _register_cansub()
     configs = can.detect_available_configs(interfaces=["cansub"])
     if device:
@@ -143,6 +145,8 @@ def probe_bitrate(
     (keep trying). No frames at all -> timeout. Returns (winning_attempt|None,
     results).
     """
+    import can
+
     sequence = sequence or AUTO_DETECT_SEQUENCE
     results: list[ProbeResult] = []
     total = len(sequence)
@@ -715,6 +719,8 @@ def make_single_signal_db(
     `minimum`/`maximum` default to the field's THEORETICAL representable range
     (`theoretical_range`), not an observed data range.
     """
+    import cantools
+
     if minimum is None or maximum is None:
         tmin, tmax = theoretical_range(length, signed, scale, offset)
         minimum = tmin if minimum is None else minimum

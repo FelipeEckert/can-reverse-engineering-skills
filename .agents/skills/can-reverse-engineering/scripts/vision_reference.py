@@ -12,6 +12,8 @@ against the raw CAN log - exactly like the OFFLINE workflow, just with no --excl
 
 OCR is local + open source (RapidOCR, ONNX runtime, no PyTorch). v1 targets NUMERIC /
 DIGITAL readouts (X degC, Y km/h, A %); analog needle gauges are out of scope.
+FFmpeg's ``ffprobe`` executable is required on PATH to read the video timestamp unless
+``--start-epoch`` is supplied explicitly.
 
 TIME BASE: frame 0 is anchored to com.apple.quicktime.creationdate (iPhone CAPTURE-START
 time, timezone-aware) + per-frame delta -> ABSOLUTE epoch per frame; the webCAN CSV is
@@ -42,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -614,7 +617,7 @@ def main() -> int:
     ap.add_argument("--unit", default="", help="physical unit shown on the display (km/h, degC, %%)")
     ap.add_argument("--fps", type=float, default=20.0, help="sample rate Hz (default 20; floor 1)")
     ap.add_argument("--start-epoch", type=float, default=None,
-                    help="Unix epoch of frame 0 (default = video creation_time)")
+                    help="Unix epoch of frame 0 (default = video metadata via ffprobe)")
     ap.add_argument("--time-offset", type=float, default=0.0,
                     help="seconds added to every epoch (manual sync nudge)")
     ap.add_argument("--out", help="sidecar CSV (default temp-output/sidecar_<label>.csv)")
@@ -666,11 +669,21 @@ def main() -> int:
 
     start_epoch = args.start_epoch
     if start_epoch is None:
+        if shutil.which("ffprobe") is None:
+            print(
+                "ERROR: ffprobe was not found on PATH. Install FFmpeg (which provides "
+                "ffprobe), or pass --start-epoch <unix-seconds> explicitly.",
+                file=sys.stderr,
+            )
+            return 1
         start_epoch = probe_creation_epoch(args.video)
     if start_epoch is None:
-        start_epoch = 0.0
-        print("  (no creation_time; start-epoch=0 -> epochs are video-relative. Pass "
-              "--start-epoch to align with the CAN log.)", file=sys.stderr)
+        print(
+            "ERROR: ffprobe found no usable creation timestamp in the video. "
+            "Pass --start-epoch <unix-seconds> explicitly to align it with the CAN log.",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.measure_clock is not None:
         return measure_clock(args, start_epoch)

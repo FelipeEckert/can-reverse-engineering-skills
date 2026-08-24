@@ -35,9 +35,20 @@ Code):
 
 1. **Clone the repo** (or download the ZIP from GitHub and extract it)
 2. **Install Python** - [Python 3.10+](https://www.python.org/downloads/); on Windows, tick **"Add python.exe to PATH"**. Verify: `python --version`
-3. **Install the dependencies** into a local virtual environment (`.venv`) so your system Python stays untouched:
+3. **Install the dependencies** into a local virtual environment (`.venv`) so your system Python stays untouched. The default remains the full installation:
    - **Windows:** double-click **`install.bat`** (or run `install.bat` in a terminal)
    - **macOS / Linux:** `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+
+   Smaller, self-contained feature sets are also available: use
+   `requirements-core.txt` for normalized-CSV offline analysis and `combine-dbc`,
+   `requirements-live.txt` for live CANsub capture, or `requirements-vision.txt`
+   for video/OCR references. The vision workflow additionally requires
+   **FFmpeg's `ffprobe` executable on `PATH`**; install FFmpeg separately for your
+   operating system because pip does not provide that executable.
+
+   This repository does **not** import CANedge MF4 files directly. Convert MF4
+   externally to normalized webCAN CSV with a tool such as `mdf2csv`, then use the
+   converted CSV with the offline workflow.
 
 ## 2. Set up Claude Code
 
