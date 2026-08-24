@@ -155,7 +155,7 @@ All Python dependencies are installed into the repository-local `.venv`.
 | File | Includes | Use it for |
 | --- | --- | --- |
 | `requirements-core.txt` | `cantools`, NumPy, pandas, SciPy, matplotlib | Normalized-CSV analysis, SavvyCAN import, reference-free analysis, DBC-reference workflows, and `combine-dbc` |
-| `requirements-live.txt` | Core plus `python-can`, `python-can-cansub`, Flask, requests | Live CANsub capture and the human-reference web UI |
+| `requirements-live.txt` | Core plus `python-can`, `python-can-cansub`, Flask, requests | Live CANsub capture/UI and experimental headless SocketCAN capture |
 | `requirements-vision.txt` | Core plus Flask, RapidOCR, ONNX Runtime, OpenCV | Local video/OCR reference extraction and review |
 | `requirements.txt` | Live plus vision | Full installation of every maintained workflow |
 
@@ -194,17 +194,28 @@ change candidate ordering, confirm a signal, or replace verification.
 
 ## Live capture: current support and limits
 
-Live capture currently supports **CANsub only**, through
-`python-can-cansub`, over USB or Ethernet. The live workflow can discover a
-CANsub via mDNS, probe common classical CAN/CAN FD bit rates passively, record a
-normalized trace, and collect a synchronized human reference through a local
-Flask UI.
+**CANsub remains the default full live backend**, through `python-can-cansub`
+over USB or Ethernet. The live workflow can discover a CANsub via mDNS, probe
+common classical CAN/CAN FD bit rates passively, record a normalized trace, and
+collect a synchronized human reference through a local Flask UI.
 
-**SocketCAN and ETAS live backends are not implemented yet.** Installing
-`python-can` does not make other python-can interfaces available to these capture
-scripts because device discovery, timing, and health checks are currently
-CANsub-specific. Existing logs from other interfaces remain usable after they
-are converted to the normalized CSV contract.
+An **experimental headless SocketCAN capture path** is also available for Linux
+interfaces that the user has already configured and brought up externally. It is
+selected explicitly, never used as a fallback, and only receives frames:
+
+```bash
+.venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
+  --backend socketcan --channel can0 --duration 15 --label baseline
+```
+
+The production capture code does not set a bit rate, bring interfaces up or
+down, or expose transmit/replay/injection operations. It writes the canonical
+normalized 12-column CSV directly, so `survey.py` and the remaining offline
+pipeline consume it unchanged. Application receive-only does not itself disable
+hardware ACK behavior; configure the SocketCAN controller's listen-only/ACK mode
+externally when electrical silence is required. SocketCAN Flask/UI integration
+is not implemented in this phase. ETAS ES582 has not yet been validated and is
+not claimed as supported.
 
 The live scripts never transmit CAN data frames. The default `vehicle` profile is
 silent/listen-only; the explicit `bench` profile allows the CANsub to acknowledge

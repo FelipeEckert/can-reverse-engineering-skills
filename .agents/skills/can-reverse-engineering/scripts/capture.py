@@ -1,5 +1,11 @@
 """
-capture.py - capture a CAN trace from a CANsub to a webCAN-format CSV.
+capture.py - passively capture CAN to a canonical normalized CSV.
+
+The default ``cansub`` backend retains the existing discovery, bit timing, and
+silent-vs-ACK behavior described below.  The experimental ``socketcan`` backend
+opens an already configured Linux interface such as can0 or vcan0 for
+application-level receive only.  It never configures the interface or bit rate.
+SocketCAN controller listen-only/ACK behavior must be configured externally.
 
 The silent-vs-ACK mode comes from the PROFILE chosen at detect_bus.py and stored
 in temp-output/bus.json:
@@ -15,8 +21,8 @@ The bus is opened with error_frames=True; error frames are counted and reported
 (they signal a bus problem) but are kept out of the CSV, which has no error-frame
 representation. Bit-rate auto-detect (detect_bus.py) is always listen_only.
 
-Reads device + bit-rate from temp-output/bus.json (run detect_bus.py first), or
-takes them as flags.
+For CANsub, reads device + bit-rate from temp-output/bus.json (run detect_bus.py
+first), or takes them as flags. SocketCAN does not read bus.json.
 
 Examples:
     .venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
@@ -25,17 +31,18 @@ Examples:
         --duration 60 --label run --ids 0x123,0x200
     .venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
         --duration 15 --label sniff --listen-only   # force silent
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
+        --backend socketcan --channel can0 --duration 15 --label baseline
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
-import can
 import common
+import live_capture
 
 
 def parse_ids(s: str | None) -> list[int] | None:
@@ -44,35 +51,11 @@ def parse_ids(s: str | None) -> list[int] | None:
     return [int(x, 0) for x in s.split(",") if x.strip()]
 
 
-class _Counter(can.Listener):
-    """Counts data frames (and unique IDs) and error frames separately."""
-
-    def __init__(self):
-        self.n = 0
-        self.errors = 0
-        self.ids: set[int] = set()
-
-    def on_message_received(self, msg: can.Message) -> None:
-        if getattr(msg, "is_error_frame", False):
-            self.errors += 1
-            return
-        self.n += 1
-        self.ids.add(msg.arbitration_id)
-
-
-class _DataOnly(can.Listener):
-    """Forward only non-error frames to a wrapped writer (keeps error frames out
-    of the webCAN CSV, which has no representation for them)."""
-
-    def __init__(self, writer: can.Listener):
-        self.writer = writer
-
-    def on_message_received(self, msg: can.Message) -> None:
-        if not getattr(msg, "is_error_frame", False):
-            self.writer.on_message_received(msg)
-
-    def stop(self) -> None:
-        self.writer.stop()
+# Kept as compatibility aliases for flask_sync.py phase 1.  The Flask controller
+# still uses its existing CANsub-specific logger/session and is intentionally not
+# integrated with the new passive layer yet.
+_Counter = live_capture.FrameCounter
+_DataOnly = live_capture.DataOnly
 
 
 def resolve_config(bus_json: str = "temp-output/bus.json", device: str | None = None,
@@ -110,29 +93,103 @@ def resolve_config(bus_json: str = "temp-output/bus.json", device: str | None = 
             "profile": cfg.get("profile")}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--duration", type=float, required=True, help="seconds to capture")
+    ap.add_argument("--backend", choices=("cansub", "socketcan"), default="cansub",
+                    help="live backend (default: cansub)")
     ap.add_argument("--label", default="capture", help="trace label (filename stem)")
     ap.add_argument("--out", help="output CSV (default temp-output/trace_<label>.csv)")
     ap.add_argument("--bus-json", default="temp-output/bus.json")
     ap.add_argument("--device")
-    ap.add_argument("--channel", type=int)
+    ap.add_argument("--channel", help="CANsub channel number, or SocketCAN interface "
+                    "name (default can0 for --backend socketcan)")
     ap.add_argument("--bitrate", type=int)
-    ap.add_argument("--data-bitrate", type=int, default=common.DEFAULT_DATA_BITRATE)
+    ap.add_argument("--data-bitrate", type=int)
     ap.add_argument("--ids", help="comma-separated hardware ID filter, e.g. 0x123,0x200")
     mode_grp = ap.add_mutually_exclusive_group()
     mode_grp.add_argument("--listen-only", dest="mode", action="store_const",
                           const="silent", help="force SILENT (no ACK) - multi-node bus")
     mode_grp.add_argument("--normal", dest="mode", action="store_const",
                           const="ack", help="force NORMAL/ACK - single-node bench")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    out = Path(args.out) if args.out else Path(f"temp-output/trace_{args.label}.csv")
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    can_filters = None
+    ids = parse_ids(args.ids)
+    if ids:
+        can_filters = [{"can_id": i, "can_mask": 0x1FFFFFFF} for i in ids]
+
+    if args.backend == "socketcan":
+        incompatible = []
+        if args.device is not None:
+            incompatible.append("--device")
+        if args.bitrate is not None:
+            incompatible.append("--bitrate")
+        if args.data_bitrate is not None:
+            incompatible.append("--data-bitrate")
+        if args.mode == "silent":
+            incompatible.append("--listen-only")
+        elif args.mode == "ack":
+            incompatible.append("--normal")
+        if incompatible:
+            print(
+                "ERROR: SocketCAN uses an externally configured interface; "
+                + ", ".join(incompatible)
+                + " cannot be applied with --backend socketcan.",
+                file=sys.stderr,
+            )
+            return 1
+
+        channel = args.channel or "can0"
+        print(
+            f"Capturing {args.duration:.0f}s on SocketCAN {channel} "
+            f"(application receive-only) -> {out}",
+            file=sys.stderr,
+        )
+        print(
+            "SocketCAN bit rate, interface state, and hardware ACK/listen-only "
+            "controller mode are configured externally.",
+            file=sys.stderr,
+        )
+        try:
+            with live_capture.open_socketcan_bus(
+                channel, can_filters=can_filters
+            ) as bus:
+                stats = live_capture.capture_passively(
+                    bus,
+                    out,
+                    args.duration,
+                    bus_channel=0,
+                    normalize_as_rx=True,
+                )
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
+        summary = f"Captured {stats.frames} frames, {len(stats.ids)} unique IDs"
+        if stats.errors:
+            summary += f"  [!] {stats.errors} error frames seen (bus problem?)"
+        print(f"{summary} -> {out}")
+        return 0
 
     # Resolve config: bus.json then CLI overrides.
     try:
-        cfg = resolve_config(args.bus_json, args.device, args.channel,
-                             args.bitrate, args.data_bitrate)
+        cansub_channel = int(args.channel) if args.channel is not None else None
+    except ValueError:
+        print("ERROR: CANsub --channel must be a numeric channel index.", file=sys.stderr)
+        return 1
+    try:
+        cfg = resolve_config(
+            args.bus_json,
+            args.device,
+            cansub_channel,
+            args.bitrate,
+            args.data_bitrate or common.DEFAULT_DATA_BITRATE,
+        )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -146,32 +203,20 @@ def main() -> int:
     else:
         listen_only = cfg["listen_only"]
 
-    out = Path(args.out) if args.out else Path(f"temp-output/trace_{args.label}.csv")
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    can_filters = None
-    ids = parse_ids(args.ids)
-    if ids:
-        can_filters = [{"can_id": i, "can_mask": 0x1FFFFFFF} for i in ids]
-
     fd = f"/{data}" if data != nominal else ""
     mode = "silent/listen_only" if listen_only else "normal/ACK"
     prof = f" [{cfg['profile']}]" if cfg.get("profile") and args.mode is None else ""
     print(f"Capturing {args.duration:.0f}s on {cfg['channel']} @ {nominal}{fd} bps "
           f"({mode}{prof}) -> {out}", file=sys.stderr)
 
-    timing = common.make_timing(nominal, data, sample_point)
-    counter = _Counter()
-    with can.Bus(interface=cfg["interface"], channel=cfg["channel"],
-                 timing=timing, listen_only=listen_only, error_frames=True,
-                 can_filters=can_filters) as bus:
-        logger = can.Logger(str(out))
-        with can.Notifier([bus], [_DataOnly(logger), counter]):
-            time.sleep(args.duration)
+    with live_capture.open_cansub_bus(
+        cfg, listen_only=listen_only, can_filters=can_filters
+    ) as bus:
+        stats = live_capture.capture_passively(bus, out, args.duration)
 
-    summary = f"Captured {counter.n} frames, {len(counter.ids)} unique IDs"
-    if counter.errors:
-        summary += f"  [!] {counter.errors} error frames seen (bus problem?)"
+    summary = f"Captured {stats.frames} frames, {len(stats.ids)} unique IDs"
+    if stats.errors:
+        summary += f"  [!] {stats.errors} error frames seen (bus problem?)"
     print(f"{summary} -> {out}")
     return 0
 

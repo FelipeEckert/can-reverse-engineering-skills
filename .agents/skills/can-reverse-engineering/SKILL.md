@@ -9,7 +9,8 @@ description: >
   correlate → bitsearch → build_dbc → verify workflow. Supports normalized webCAN
   CSV and SavvyCAN/GVRET CSV, plus CANedge MF4 after external conversion, with
   OBD2, GPS, or other DBC-decoded references; live CANsub capture with a human
-  reference; and video-based OCR references. Handles classical CAN, CAN FD,
+  reference; experimental headless SocketCAN capture; and video-based OCR
+  references. Handles classical CAN, CAN FD,
   arbitrary-start/length little-endian fields, and byte-aligned big-endian fields.
   Look for named logs in the working directory and TEMP before asking the user
   where they are.
@@ -18,9 +19,9 @@ description: >
 # CAN reverse engineering
 
 A deterministic, scriptable workflow for reverse engineering CAN signals from
-recorded logs or through optional live CANsub capture. The bundled scripts in
-`scripts/` each cover one stage. The live scripts never transmit **data** frames
-onto the bus. The safe default is the `vehicle` profile: capture inherits
+recorded logs or through optional live CANsub or headless SocketCAN capture. The
+bundled scripts in `scripts/` each cover one stage. The live scripts never transmit **data** frames
+onto the bus. For CANsub, the safe default is the `vehicle` profile: capture inherits
 **silent/listen-only** mode from `temp-output/bus.json`, so passive capture is the
 baseline. Use the explicit `bench` profile (or `capture.py --normal`) only for a
 **single-node sensor-to-CAN module** that needs the CANsub to supply the ACK bit;
@@ -55,9 +56,11 @@ and sidecar share a reference).
 - `survey.py` flags **rolling counters** (excluded from correlation) and
   **checksum-like** bytes (a hint — not excluded, since a wide signal's low byte
   can resemble one).
-- The bus **bit-rate is unknown** and resolved by probing (`detect_bus.py`).
-- **Profile**: choose silent (vehicle) vs ACK (bench) at `detect_bus.py`; an init
-  health-check warns on an unhealthy bus. See `references/re-methodology.md`.
+- For CANsub, the bus **bit-rate may be unknown** and is resolved by probing
+  (`detect_bus.py`). SocketCAN interfaces are always configured externally.
+- **CANsub profile**: choose silent (vehicle) vs ACK (bench) at `detect_bus.py`;
+  an init health-check warns on an unhealthy bus. See
+  `references/re-methodology.md`.
 
 ## Output structure — temporary vs decoded deliverables
 
@@ -229,12 +232,25 @@ or `requirements-vision.txt` for a self-contained feature environment.
 
 ## Live interface scope
 
-Live discovery, bit-rate probing, capture, and health checks currently target
-CANsub through `python-can-cansub`. SocketCAN and ETAS live backends are not
-implemented. Recorded logs from other interfaces remain usable after conversion
-to the normalized CSV contract. For CANsub hardware, firmware, connector, or API
-details not documented here, consult current CSS Electronics and
-`python-can-cansub` documentation rather than inferring them.
+CANsub remains the default and full live backend through `python-can-cansub`:
+discovery, passive bit-rate probing, profiles, health checks, headless capture,
+and the Flask human-reference UI retain their existing behavior.
+
+`capture.py` also has an **experimental headless SocketCAN receive path** for an
+already configured Linux interface such as `can0` or `vcan0`. Select it explicitly
+with `--backend socketcan`; there is no automatic fallback. The application only
+receives and never configures bit rates, changes interface state, or transmits CAN
+frames. The user must prepare the interface externally. In particular,
+application-level receive-only does not force the CAN controller into hardware
+listen-only mode: configure controller ACK/listen-only behavior externally when
+electrical silence is required. SocketCAN capture writes the same normalized
+12-column CSV consumed by the existing offline pipeline. Flask/UI SocketCAN
+integration is not implemented. ETAS ES582 has not been validated or documented
+as a supported live backend.
+
+For CANsub hardware, firmware, connector, or API details not documented here,
+consult current CSS Electronics and `python-can-cansub` documentation rather than
+inferring them.
 
 ## Workflow
 
@@ -246,7 +262,7 @@ the full repository-relative script path under
 working-directory root. Do not `cd` into the skill folder — that would create
 `temp-output/`/`decoding-output/` inside the skill.
 
-1. **Init: device + bit-rate + profile + health (always first).**
+1. **Init: CANsub device + bit-rate + profile + health (CANsub only).**
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/detect_bus.py --profile <vehicle|bench>`
    Discovers the CANsub via mDNS, auto-detects the bit-rate passively
    (listen_only + error frames; first valid frame wins), records the **profile**,
@@ -268,12 +284,21 @@ working-directory root. Do not `cd` into the skill folder — that would create
    and wrong-profile (no-ACK) situations before you waste a capture. Override the
    recorded mode on any capture with `--listen-only` / `--normal`.
 
+   **SocketCAN skips this step.** Prepare and configure `can0` externally; do not
+   use `detect_bus.py`, `--bitrate`, profiles, `--listen-only`, or `--normal` for
+   the SocketCAN capture path.
+
 2. **Capture a baseline / working trace.**
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py --duration 15 --label baseline`
    Writes `temp-output/trace_baseline.csv` (webCAN CSV format). It inherits the
    recorded profile: the default `vehicle` profile is passive/listen-only, while
    the explicit `bench` profile supplies ACK for a single-node module. Override a
    specific capture only when needed with `--listen-only` or `--normal`.
+
+   Experimental SocketCAN headless capture from an externally prepared interface:
+   `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py --backend socketcan --channel can0 --duration 15 --label baseline`
+   This is application receive-only and emits the same normalized trace. Hardware
+   ACK/listen-only controller mode remains an external interface setting.
 
 3. **Survey the bus (this BASELINE scan maps bus STRUCTURE, not the target).**
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py --trace temp-output/trace_baseline.csv --suffix steady \
@@ -1006,8 +1031,10 @@ is unchanged.
   for any other known steady value pass **`--anchor <value>`**. Anchors aren't
   always available, but when you have a clean one, it is the single strongest
   constraint on the calibration — lean on it.
-- Every script supports `--help`. Pass `--device <id-substring>` to disambiguate
-  if multiple CANsubs are connected; otherwise the first discovered is used.
+- Every script supports `--help`. For CANsub, pass `--device <id-substring>` to
+  disambiguate if multiple devices are connected; otherwise the first discovered
+  CANsub is used. SocketCAN instead requires explicit `--backend socketcan` and
+  accepts an interface name through `--channel` (default `can0`).
 - For discrete-STATE targets (lock, gear, wiper), use `--mode holds` with the state
   values and the normal `--type continuous` pipeline — a few-level hold finds the
   bit/field. Only a *truly momentary* event you cannot hold needs the headless
