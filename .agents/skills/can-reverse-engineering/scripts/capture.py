@@ -202,6 +202,11 @@ def main(argv: list[str] | None = None) -> int:
             print("SocketCAN SO_RCVBUF: unavailable")
         else:
             print(f"SocketCAN SO_RCVBUF: {stats.socket_receive_buffer} bytes")
+        overflow = stats.socket_rx_queue_overflow_drops
+        print(
+            "SocketCAN RX queue overflow drops: "
+            f"{overflow if overflow is not None else 'unavailable'}"
+        )
         delta_parts = [
             f"{name}={value if value is not None else 'unavailable'}"
             for name, value in stats.netdevice_rx_deltas.items()

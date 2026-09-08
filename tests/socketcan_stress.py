@@ -186,6 +186,17 @@ class StressResult:
         )
 
     @property
+    def overflow_matches_missing(self) -> bool | None:
+        if not self.loss_confirmation_available:
+            return None
+        assert self.capture_stats is not None
+        assert self.validation is not None
+        overflow = self.capture_stats.socket_rx_queue_overflow_drops
+        if overflow is None:
+            return None
+        return overflow == self.validation.missing_sequences
+
+    @property
     def outcome(self) -> str:
         if self.lifecycle_failed:
             return "HARNESS/LIFECYCLE FAILURE"
@@ -204,6 +215,7 @@ class StressResult:
                 and not validation.missing_sequences
             )
             or self.capture_stats.errors
+            or self.overflow_matches_missing is not True
         )
         if non_loss_failure:
             return "CAPTURE VALIDATION FAILURE"
@@ -674,11 +686,14 @@ def print_result(result: StressResult) -> None:
     if stats is None:
         print("receiver: no capture statistics")
     else:
+        overflow = stats.socket_rx_queue_overflow_drops
         print(
             "receiver: "
             f"data_frames={stats.frames}, writer_rows={stats.rows_written}, "
             f"error_frames={stats.errors}, elapsed={stats.elapsed_seconds:.3f}s, "
-            f"average={stats.average_fps:.1f} data frames/s"
+            f"average={stats.average_fps:.1f} data frames/s, "
+            f"socket_rx_queue_overflow_drops="
+            f"{overflow if overflow is not None else 'unavailable'}"
         )
     validation = result.validation
     if validation is None:
@@ -711,6 +726,11 @@ def print_result(result: StressResult) -> None:
                 "CAN-ID mismatch samples (sequence, actual, expected): "
                 f"{validation.can_id_mismatch_samples}"
             )
+        overflow_match = result.overflow_matches_missing
+        print(
+            "overflow/missing agreement: "
+            f"{overflow_match if overflow_match is not None else 'unavailable'}"
+        )
     drain_status = "complete" if result.drain_completed else "TIMEOUT"
     print(
         "lifecycle: "

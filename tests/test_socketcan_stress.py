@@ -572,6 +572,7 @@ class OutcomeTests(unittest.TestCase):
             rows_written=1,
             elapsed_seconds=1.0,
             average_fps=1.0,
+            socket_rx_queue_overflow_drops=1,
         )
         validation = socketcan_stress.SequenceValidation(
             csv_rows=1,
@@ -616,6 +617,7 @@ class OutcomeTests(unittest.TestCase):
 
         self.assertFalse(result.lifecycle_failed)
         self.assertTrue(result.confirmed_capture_loss)
+        self.assertTrue(result.overflow_matches_missing)
         self.assertEqual(result.outcome, "EXPECTED OVERLOAD CHARACTERIZATION LOSS")
         self.assertEqual(result.exit_code, 0)
 
@@ -623,6 +625,24 @@ class OutcomeTests(unittest.TestCase):
         result = self._loss_result(overload_characterization=False)
 
         self.assertEqual(result.outcome, "CONFIRMED CAPTURE LOSS")
+        self.assertEqual(result.exit_code, 1)
+
+    def test_overflow_mismatch_is_a_capture_validation_failure(self) -> None:
+        result = self._loss_result(overload_characterization=True)
+        assert result.capture_stats is not None
+        result.capture_stats.socket_rx_queue_overflow_drops = 0
+
+        self.assertFalse(result.overflow_matches_missing)
+        self.assertEqual(result.outcome, "CAPTURE VALIDATION FAILURE")
+        self.assertEqual(result.exit_code, 1)
+
+    def test_unavailable_overflow_metric_is_a_capture_validation_failure(self) -> None:
+        result = self._loss_result(overload_characterization=True)
+        assert result.capture_stats is not None
+        result.capture_stats.socket_rx_queue_overflow_drops = None
+
+        self.assertIsNone(result.overflow_matches_missing)
+        self.assertEqual(result.outcome, "CAPTURE VALIDATION FAILURE")
         self.assertEqual(result.exit_code, 1)
 
 

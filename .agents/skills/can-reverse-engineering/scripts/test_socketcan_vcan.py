@@ -109,6 +109,7 @@ class VcanIntegrationTest(unittest.TestCase):
             self.assertEqual(len(captured), 1)
             self.assertEqual(captured[0].frames, 16)
             self.assertEqual(captured[0].rows_written, 16)
+            self.assertEqual(captured[0].socket_rx_queue_overflow_drops, 0)
             self.assertGreater(captured[0].elapsed_seconds, 0.0)
             self.assertGreater(captured[0].average_fps, 0.0)
 

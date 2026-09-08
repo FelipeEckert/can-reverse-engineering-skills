@@ -8,13 +8,16 @@ replay, injection, bit-rate configuration, or interface-state operations.
 from __future__ import annotations
 
 import csv
+import select
 import socket
+import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import can
+from can.interfaces.socketcan import socketcan as python_can_socketcan
 
 import common
 from trace_validation import NORMALIZED_COLUMNS
@@ -29,6 +32,126 @@ NETDEVICE_RX_COUNTERS = (
     "rx_missed_errors",
 )
 
+SO_RXQ_OVFL = 40
+SO_RXQ_OVFL_STRUCT = struct.Struct("@I")
+SOCKETCAN_ANCILLARY_BUFFER_SIZE = (
+    socket.CMSG_SPACE(python_can_socketcan.RECEIVED_TIMESTAMP_STRUCT.size)
+    + socket.CMSG_SPACE(SO_RXQ_OVFL_STRUCT.size)
+)
+
+
+class SocketcanBusWithOverflow(python_can_socketcan.SocketcanBus):
+    """python-can SocketCAN bus with per-socket RX queue drop accounting."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.socket_rx_queue_overflow_total: int | None = None
+        self._socket_rx_queue_overflow_raw = 0
+        super().__init__(*args, **kwargs)
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, SO_RXQ_OVFL, 1)
+        except OSError:
+            return
+        self.socket_rx_queue_overflow_total = 0
+
+    def _recv_internal(
+        self, timeout: float | None
+    ) -> tuple[can.Message | None, bool]:
+        try:
+            ready, _, _ = select.select([self.socket], [], [], timeout)
+        except OSError as error:
+            raise can.CanOperationError(
+                f"Failed to receive: {error.strerror}", error.errno
+            ) from error
+        if not ready:
+            return None, self._is_filtered
+
+        try:
+            frame, ancillary, msg_flags, addr = self.socket.recvmsg(
+                python_can_socketcan.constants.CANFD_MTU,
+                SOCKETCAN_ANCILLARY_BUFFER_SIZE,
+            )
+        except OSError as error:
+            raise can.CanOperationError(
+                f"Error receiving: {error.strerror}", error.errno
+            ) from error
+        if msg_flags & socket.MSG_CTRUNC:
+            raise can.CanOperationError("SocketCAN ancillary data was truncated")
+
+        timestamp_data = None
+        overflow_data = None
+        for cmsg_level, cmsg_type, cmsg_data in ancillary:
+            if (
+                cmsg_level == socket.SOL_SOCKET
+                and cmsg_type == python_can_socketcan.constants.SO_TIMESTAMPNS
+            ):
+                if timestamp_data is not None:
+                    raise can.CanOperationError("duplicate SocketCAN timestamp")
+                timestamp_data = cmsg_data
+            elif cmsg_level == socket.SOL_SOCKET and cmsg_type == SO_RXQ_OVFL:
+                if overflow_data is not None:
+                    raise can.CanOperationError("duplicate SO_RXQ_OVFL value")
+                overflow_data = cmsg_data
+            else:
+                raise can.CanOperationError(
+                    "unexpected SocketCAN ancillary message "
+                    f"level={cmsg_level} type={cmsg_type}"
+                )
+
+        try:
+            if timestamp_data is None:
+                raise struct.error("missing timestamp")
+            seconds, nanoseconds = (
+                python_can_socketcan.RECEIVED_TIMESTAMP_STRUCT.unpack_from(
+                    timestamp_data
+                )
+            )
+            overflow = (
+                SO_RXQ_OVFL_STRUCT.unpack(overflow_data)[0]
+                if overflow_data is not None
+                else None
+            )
+        except struct.error as error:
+            raise can.CanOperationError(
+                f"invalid SocketCAN ancillary data: {error}"
+            ) from error
+        if nanoseconds >= 1_000_000_000:
+            raise can.CanOperationError(
+                "Timestamp nanoseconds field was out of range: "
+                f"{nanoseconds} not less than 1e9"
+            )
+        if overflow is not None:
+            if self.socket_rx_queue_overflow_total is None:
+                self.socket_rx_queue_overflow_total = 0
+            self.socket_rx_queue_overflow_total += (
+                overflow - self._socket_rx_queue_overflow_raw
+            ) & 0xFFFFFFFF
+            self._socket_rx_queue_overflow_raw = overflow
+
+        can_id, can_dlc, flags, data = python_can_socketcan.dissect_can_frame(frame)
+        is_extended = bool(can_id & python_can_socketcan.constants.CAN_EFF_FLAG)
+        channel = None
+        if self.channel == "":
+            channel = addr[0] if isinstance(addr, tuple) else addr
+        message = can.Message(
+            timestamp=seconds + nanoseconds * 1e-9,
+            channel=channel,
+            arbitration_id=can_id & (0x1FFFFFFF if is_extended else 0x000007FF),
+            is_extended_id=is_extended,
+            is_remote_frame=bool(can_id & python_can_socketcan.constants.CAN_RTR_FLAG),
+            is_error_frame=bool(can_id & python_can_socketcan.constants.CAN_ERR_FLAG),
+            is_fd=len(frame) == python_can_socketcan.constants.CANFD_MTU,
+            is_rx=not bool(msg_flags & socket.MSG_DONTROUTE),
+            bitrate_switch=bool(flags & python_can_socketcan.constants.CANFD_BRS),
+            error_state_indicator=bool(
+                flags & python_can_socketcan.constants.CANFD_ESI
+            ),
+            dlc=can_dlc,
+            data=data,
+        )
+        if not message.channel and self.channel:
+            message.channel = self.channel
+        return message, self._is_filtered
+
 
 @dataclass
 class CaptureStats:
@@ -42,6 +165,7 @@ class CaptureStats:
     elapsed_seconds: float = 0.0
     average_fps: float = 0.0
     socket_receive_buffer: int | None = None
+    socket_rx_queue_overflow_drops: int | None = None
     netdevice_rx_before: dict[str, int | None] = field(default_factory=dict)
     netdevice_rx_after: dict[str, int | None] = field(default_factory=dict)
     netdevice_rx_deltas: dict[str, int | None] = field(default_factory=dict)
@@ -210,19 +334,17 @@ def open_socketcan_bus(
     """Open an already configured SocketCAN interface for application RX only.
 
     ``fd=True`` enables receipt of CAN FD frames on interfaces that support them;
-    it does not configure the controller or its bit rates.  ``ignore_config``
-    prevents ambient python-can configuration from changing the selected backend.
+    it does not configure the controller or its bit rates.  Direct construction
+    keeps ambient python-can configuration from changing the selected backend.
     """
 
     if not channel.strip():
         raise RuntimeError("SocketCAN requires a non-empty interface name")
     try:
-        return can.Bus(
-            interface="socketcan",
+        return SocketcanBusWithOverflow(
             channel=channel,
             fd=True,
             receive_own_messages=False,
-            ignore_config=True,
             can_filters=can_filters,
         )
     except (can.CanError, OSError) as exc:
@@ -297,6 +419,7 @@ def capture_passively(
     )
     counter = FrameCounter()
     notifier: can.Notifier | None = None
+    overflow_before = getattr(bus, "socket_rx_queue_overflow_total", None)
     started = time.monotonic()
     ended = started
     try:
@@ -320,6 +443,9 @@ def capture_passively(
 
     stats = counter.stats
     stats.rows_written = writer.rows_written
+    overflow_after = getattr(bus, "socket_rx_queue_overflow_total", None)
+    if isinstance(overflow_before, int) and isinstance(overflow_after, int):
+        stats.socket_rx_queue_overflow_drops = overflow_after - overflow_before
     stats.elapsed_seconds = max(0.0, ended - started)
     if stats.elapsed_seconds > 0:
         stats.average_fps = stats.frames / stats.elapsed_seconds

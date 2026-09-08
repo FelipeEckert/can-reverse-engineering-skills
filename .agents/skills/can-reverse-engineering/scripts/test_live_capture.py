@@ -267,6 +267,140 @@ class NormalizedWriterTests(unittest.TestCase):
 
 
 class BackendTests(unittest.TestCase):
+    @staticmethod
+    def _receive_bus(
+        ancillary: list[tuple[int, int, bytes]], *, msg_flags: int = 0
+    ) -> tuple[live_capture.SocketcanBusWithOverflow, can.Message]:
+        bus = object.__new__(live_capture.SocketcanBusWithOverflow)
+        bus.socket = mock.Mock()
+        bus.channel = "vcan0"
+        bus._is_filtered = True
+        bus.socket_rx_queue_overflow_total = 0
+        bus._socket_rx_queue_overflow_raw = 0
+        frame = live_capture.python_can_socketcan.build_can_frame(
+            can.Message(
+                arbitration_id=0x123,
+                is_extended_id=False,
+                data=b"\x01\x02",
+            )
+        )
+        bus.socket.recvmsg.return_value = (
+            frame,
+            ancillary,
+            msg_flags,
+            ("vcan0",),
+        )
+        with mock.patch.object(
+            live_capture.select, "select", return_value=([bus.socket], [], [])
+        ):
+            message, already_filtered = bus._recv_internal(1.0)
+        assert message is not None
+        assert already_filtered
+        return bus, message
+
+    def test_socketcan_bus_enables_rx_queue_overflow_reporting(self) -> None:
+        bus_socket = mock.Mock()
+
+        def initialize(instance, *args, **kwargs) -> None:
+            instance.socket = bus_socket
+
+        with mock.patch.object(
+            live_capture.python_can_socketcan.SocketcanBus,
+            "__init__",
+            new=initialize,
+        ):
+            bus = live_capture.SocketcanBusWithOverflow(channel="vcan0")
+
+        bus_socket.setsockopt.assert_called_once_with(
+            socket.SOL_SOCKET, live_capture.SO_RXQ_OVFL, 1
+        )
+        self.assertEqual(bus.socket_rx_queue_overflow_total, 0)
+
+    def test_socketcan_receive_parses_timestamp_and_overflow_ancillary_data(
+        self,
+    ) -> None:
+        timestamp = live_capture.python_can_socketcan.RECEIVED_TIMESTAMP_STRUCT.pack(
+            1_700_000_000, 125_000_000
+        )
+        overflow = live_capture.SO_RXQ_OVFL_STRUCT.pack(7)
+
+        bus, message = self._receive_bus(
+            [
+                (socket.SOL_SOCKET, live_capture.SO_RXQ_OVFL, overflow),
+                (
+                    socket.SOL_SOCKET,
+                    live_capture.python_can_socketcan.constants.SO_TIMESTAMPNS,
+                    timestamp,
+                ),
+            ]
+        )
+
+        self.assertEqual(message.arbitration_id, 0x123)
+        self.assertEqual(message.data, bytearray(b"\x01\x02"))
+        self.assertAlmostEqual(message.timestamp, 1_700_000_000.125)
+        self.assertEqual(bus.socket_rx_queue_overflow_total, 7)
+        bus.socket.recvmsg.assert_called_once_with(
+            live_capture.python_can_socketcan.constants.CANFD_MTU,
+            live_capture.SOCKETCAN_ANCILLARY_BUFFER_SIZE,
+        )
+
+    def test_socketcan_overflow_counter_accumulates_across_u32_wrap(self) -> None:
+        timestamp = live_capture.python_can_socketcan.RECEIVED_TIMESTAMP_STRUCT.pack(
+            1_700_000_000, 0
+        )
+        overflow = live_capture.SO_RXQ_OVFL_STRUCT.pack(3)
+        bus = object.__new__(live_capture.SocketcanBusWithOverflow)
+        bus.socket = mock.Mock()
+        bus.channel = "vcan0"
+        bus._is_filtered = True
+        bus.socket_rx_queue_overflow_total = 10
+        bus._socket_rx_queue_overflow_raw = 0xFFFFFFFE
+        bus.socket.recvmsg.return_value = (
+            live_capture.python_can_socketcan.build_can_frame(
+                can.Message(
+                    arbitration_id=0x123,
+                    is_extended_id=False,
+                    data=b"\x01",
+                )
+            ),
+            [
+                (
+                    socket.SOL_SOCKET,
+                    live_capture.python_can_socketcan.constants.SO_TIMESTAMPNS,
+                    timestamp,
+                ),
+                (socket.SOL_SOCKET, live_capture.SO_RXQ_OVFL, overflow),
+            ],
+            0,
+            ("vcan0",),
+        )
+
+        with mock.patch.object(
+            live_capture.select, "select", return_value=([bus.socket], [], [])
+        ):
+            bus._recv_internal(1.0)
+
+        self.assertEqual(bus.socket_rx_queue_overflow_total, 15)
+
+    def test_socketcan_receive_rejects_truncated_ancillary_data(self) -> None:
+        bus = object.__new__(live_capture.SocketcanBusWithOverflow)
+        bus.socket = mock.Mock()
+        bus.channel = "vcan0"
+        bus._is_filtered = True
+        bus.socket_rx_queue_overflow_total = 0
+        bus._socket_rx_queue_overflow_raw = 0
+        bus.socket.recvmsg.return_value = (b"", [], socket.MSG_CTRUNC, ("vcan0",))
+
+        with (
+            mock.patch.object(
+                live_capture.select, "select", return_value=([bus.socket], [], [])
+            ),
+            self.assertRaisesRegex(
+                can.CanOperationError, "ancillary data was truncated"
+            ),
+        ):
+            bus._recv_internal(1.0)
+
     def test_socketcan_receive_buffer_is_read_without_setting_it(self) -> None:
         bus_socket = mock.Mock()
         bus_socket.getsockopt.return_value = 212_992
@@ -370,7 +504,33 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(stats.errors, 1)
         self.assertEqual(stats.elapsed_seconds, 2.5)
         self.assertEqual(stats.average_fps, 1.2)
+        self.assertIsNone(stats.socket_rx_queue_overflow_drops)
         self.assertEqual(len(validated), 3)
+
+    def test_capture_reports_overflow_delta_at_final_notifier_boundary(self) -> None:
+        class Bus:
+            socket_rx_queue_overflow_total = 2
+
+        class Notifier:
+            def __init__(self, buses, listeners) -> None:
+                self.bus = buses[0]
+                self.exception = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                self.bus.socket_rx_queue_overflow_total = 7
+
+        with (
+            tempfile.TemporaryDirectory(prefix="capture_overflow_delta_") as directory,
+            mock.patch.object(live_capture.can, "Notifier", Notifier),
+        ):
+            stats = live_capture.capture_passively(
+                Bus(), Path(directory) / "trace.csv", 0.0, bus_channel=0
+            )
+
+        self.assertEqual(stats.socket_rx_queue_overflow_drops, 5)
 
     def test_subsecond_capture_uses_actual_elapsed_time_for_average(self) -> None:
         messages = [
@@ -575,15 +735,15 @@ class BackendTests(unittest.TestCase):
     def test_socketcan_open_is_explicit_and_configuration_free(self) -> None:
         filters = [{"can_id": 0x123, "can_mask": 0x1FFFFFFF}]
         sentinel_bus = object()
-        with mock.patch.object(live_capture.can, "Bus", return_value=sentinel_bus) as bus:
+        with mock.patch.object(
+            live_capture, "SocketcanBusWithOverflow", return_value=sentinel_bus
+        ) as bus:
             opened = live_capture.open_socketcan_bus("can0", can_filters=filters)
         self.assertIs(opened, sentinel_bus)
         bus.assert_called_once_with(
-            interface="socketcan",
             channel="can0",
             fd=True,
             receive_own_messages=False,
-            ignore_config=True,
             can_filters=filters,
         )
         kwargs = bus.call_args.kwargs
@@ -594,8 +754,8 @@ class BackendTests(unittest.TestCase):
 
     def test_socketcan_open_failure_is_clear_and_has_no_fallback(self) -> None:
         with mock.patch.object(
-            live_capture.can,
-            "Bus",
+            live_capture,
+            "SocketcanBusWithOverflow",
             side_effect=can.CanInitializationError("missing interface"),
         ) as bus:
             with self.assertRaisesRegex(RuntimeError, "could not open.*missing0"):
@@ -731,6 +891,7 @@ class BackendTests(unittest.TestCase):
             ids={0x123},
             elapsed_seconds=2.0,
             average_fps=0.5,
+            socket_rx_queue_overflow_drops=4,
         )
         before = {name: 10 for name in live_capture.NETDEVICE_RX_COUNTERS}
         after = {name: 10 for name in live_capture.NETDEVICE_RX_COUNTERS}
@@ -784,6 +945,9 @@ class BackendTests(unittest.TestCase):
         self.assertIn("average=0.5 data frames/s", stdout.getvalue())
         self.assertNotIn("peak", stdout.getvalue())
         self.assertIn("SocketCAN SO_RCVBUF: 212992 bytes", stdout.getvalue())
+        self.assertIn(
+            "SocketCAN RX queue overflow drops: 4", stdout.getvalue()
+        )
         self.assertIn("rx_packets=0", stdout.getvalue())
         self.assertIn("rx_missed_errors=0", stdout.getvalue())
 
@@ -874,7 +1038,6 @@ class BackendTests(unittest.TestCase):
             "send_periodic",
             "replay",
             "inject",
-            "setsockopt",
         }
         calls = {
             node.func.attr
@@ -884,6 +1047,11 @@ class BackendTests(unittest.TestCase):
             and isinstance(node.func, ast.Attribute)
         }
         self.assertTrue(forbidden_calls.isdisjoint(calls))
+        production_source = "\n".join(
+            path.read_text(encoding="utf-8") for path in source_paths
+        )
+        self.assertEqual(production_source.count(".setsockopt("), 1)
+        self.assertIn("SO_RXQ_OVFL", production_source)
         for source_path in source_paths:
             self.assertNotIn(
                 "ip link set", source_path.read_text(encoding="utf-8").lower()
