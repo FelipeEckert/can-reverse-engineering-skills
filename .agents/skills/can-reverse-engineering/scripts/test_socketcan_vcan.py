@@ -108,6 +108,9 @@ class VcanIntegrationTest(unittest.TestCase):
             self.assertFalse(failures, failures)
             self.assertEqual(len(captured), 1)
             self.assertEqual(captured[0].frames, 16)
+            self.assertEqual(captured[0].rows_written, 16)
+            self.assertGreater(captured[0].elapsed_seconds, 0.0)
+            self.assertGreater(captured[0].average_fps, 0.0)
 
             validated = validate_normalized_trace(trace)
             self.assertEqual(len(validated), 16)

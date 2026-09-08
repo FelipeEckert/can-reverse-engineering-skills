@@ -155,25 +155,67 @@ def main(argv: list[str] | None = None) -> int:
             "controller mode are configured externally.",
             file=sys.stderr,
         )
+        stats = None
+        capture_error = None
+        rx_buffer = None
+        rx_before = {}
+        rx_after = {}
         try:
             with live_capture.open_socketcan_bus(
                 channel, can_filters=can_filters
             ) as bus:
-                stats = live_capture.capture_passively(
-                    bus,
-                    out,
-                    args.duration,
-                    bus_channel=0,
-                    normalize_as_rx=True,
-                )
+                rx_buffer = live_capture.socketcan_receive_buffer(bus)
+                rx_before = live_capture.snapshot_netdevice_rx_counters(channel)
+                try:
+                    stats = live_capture.capture_passively(
+                        bus,
+                        out,
+                        args.duration,
+                        bus_channel=0,
+                        normalize_as_rx=True,
+                    )
+                except live_capture.CaptureError as exc:
+                    stats = exc.stats
+                    capture_error = exc
+                finally:
+                    rx_after = live_capture.snapshot_netdevice_rx_counters(channel)
         except RuntimeError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
 
-        summary = f"Captured {stats.frames} frames, {len(stats.ids)} unique IDs"
+        stats.socket_receive_buffer = rx_buffer
+        stats.netdevice_rx_before = rx_before
+        stats.netdevice_rx_after = rx_after
+        stats.netdevice_rx_deltas = live_capture.netdevice_rx_counter_deltas(
+            rx_before, rx_after
+        )
+
+        summary = (
+            f"Captured {stats.frames} data frames, wrote {stats.rows_written} CSV rows, "
+            f"{len(stats.ids)} unique IDs in {stats.elapsed_seconds:.3f}s"
+        )
         if stats.errors:
             summary += f"  [!] {stats.errors} error frames seen (bus problem?)"
         print(f"{summary} -> {out}")
+        print(f"Rate: average={stats.average_fps:.1f} data frames/s")
+        if stats.socket_receive_buffer is None:
+            print("SocketCAN SO_RCVBUF: unavailable")
+        else:
+            print(f"SocketCAN SO_RCVBUF: {stats.socket_receive_buffer} bytes")
+        delta_parts = [
+            f"{name}={value if value is not None else 'unavailable'}"
+            for name, value in stats.netdevice_rx_deltas.items()
+        ]
+        print("Netdevice RX deltas: " + ", ".join(delta_parts))
+        if stats.rows_written != stats.frames:
+            print(
+                f"[!] received/written mismatch: {stats.frames} data frames vs "
+                f"{stats.rows_written} CSV rows",
+                file=sys.stderr,
+            )
+        if capture_error is not None:
+            print(f"ERROR: {capture_error}", file=sys.stderr)
+            return 1
         return 0
 
     # Resolve config: bus.json then CLI overrides.
@@ -209,15 +251,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Capturing {args.duration:.0f}s on {cfg['channel']} @ {nominal}{fd} bps "
           f"({mode}{prof}) -> {out}", file=sys.stderr)
 
+    capture_error = None
     with live_capture.open_cansub_bus(
         cfg, listen_only=listen_only, can_filters=can_filters
     ) as bus:
-        stats = live_capture.capture_passively(bus, out, args.duration)
+        try:
+            stats = live_capture.capture_passively(bus, out, args.duration)
+        except live_capture.CaptureError as exc:
+            stats = exc.stats
+            capture_error = exc
 
-    summary = f"Captured {stats.frames} frames, {len(stats.ids)} unique IDs"
+    summary = f"Captured {stats.frames} data frames, {len(stats.ids)} unique IDs"
     if stats.errors:
         summary += f"  [!] {stats.errors} error frames seen (bus problem?)"
     print(f"{summary} -> {out}")
+    if capture_error is not None:
+        print(f"ERROR: {capture_error}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -8,6 +8,7 @@ replay, injection, bit-rate configuration, or interface-state operations.
 from __future__ import annotations
 
 import csv
+import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,13 +20,39 @@ import common
 from trace_validation import NORMALIZED_COLUMNS
 
 
+NETDEVICE_RX_COUNTERS = (
+    "rx_packets",
+    "rx_dropped",
+    "rx_errors",
+    "rx_fifo_errors",
+    "rx_over_errors",
+    "rx_missed_errors",
+)
+
+
 @dataclass
 class CaptureStats:
     """Counts collected during one passive capture."""
 
+    # ``frames`` counts non-error/data frames; error frames are separate.
     frames: int = 0
+    rows_written: int = 0
     errors: int = 0
     ids: set[int] = field(default_factory=set)
+    elapsed_seconds: float = 0.0
+    average_fps: float = 0.0
+    socket_receive_buffer: int | None = None
+    netdevice_rx_before: dict[str, int | None] = field(default_factory=dict)
+    netdevice_rx_after: dict[str, int | None] = field(default_factory=dict)
+    netdevice_rx_deltas: dict[str, int | None] = field(default_factory=dict)
+
+
+class CaptureError(RuntimeError):
+    """A receive-thread failure with the aggregate stats collected so far."""
+
+    def __init__(self, message: str, stats: CaptureStats) -> None:
+        super().__init__(message)
+        self.stats = stats
 
 
 class FrameCounter(can.Listener):
@@ -94,6 +121,7 @@ class NormalizedCSVWriter(can.Listener):
         self._file = self.path.open("w", encoding="utf-8", newline="")
         self._writer = csv.writer(self._file, delimiter=";", lineterminator="\n")
         self._writer.writerow(NORMALIZED_COLUMNS)
+        self.rows_written = 0
         self._stopped = False
 
     def _channel_for(self, msg: can.Message) -> int:
@@ -144,6 +172,7 @@ class NormalizedCSVWriter(can.Listener):
                 msg.data.hex().upper(),
             )
         )
+        self.rows_written += 1
 
     def stop(self) -> None:
         if not self._stopped:
@@ -203,6 +232,51 @@ def open_socketcan_bus(
         ) from exc
 
 
+def socketcan_receive_buffer(bus: can.BusABC) -> int | None:
+    """Return the effective SocketCAN SO_RCVBUF without changing it."""
+
+    bus_socket = getattr(bus, "socket", None)
+    if bus_socket is None:
+        return None
+    try:
+        return int(bus_socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def snapshot_netdevice_rx_counters(
+    channel: str,
+    *,
+    sysfs_root: str | Path = "/sys/class/net",
+) -> dict[str, int | None]:
+    """Read supported netdevice RX counters without changing interface state."""
+
+    statistics = Path(sysfs_root) / channel / "statistics"
+    snapshot: dict[str, int | None] = {}
+    for name in NETDEVICE_RX_COUNTERS:
+        try:
+            snapshot[name] = int((statistics / name).read_text(encoding="ascii").strip())
+        except (OSError, UnicodeError, ValueError):
+            snapshot[name] = None
+    return snapshot
+
+
+def netdevice_rx_counter_deltas(
+    before: dict[str, int | None],
+    after: dict[str, int | None],
+) -> dict[str, int | None]:
+    """Subtract two netdevice snapshots, preserving unavailable counters."""
+
+    deltas: dict[str, int | None] = {}
+    for name in NETDEVICE_RX_COUNTERS:
+        earlier = before.get(name)
+        later = after.get(name)
+        deltas[name] = (
+            later - earlier if earlier is not None and later is not None else None
+        )
+    return deltas
+
+
 def capture_passively(
     bus: can.BusABC,
     output: str | Path,
@@ -213,15 +287,45 @@ def capture_passively(
 ) -> CaptureStats:
     """Receive for ``duration`` seconds and write normalized data frames."""
 
+    if duration < 0:
+        raise ValueError("duration must be non-negative")
+
     writer = NormalizedCSVWriter(
         output,
         bus_channel=bus_channel,
         normalize_as_rx=normalize_as_rx,
     )
     counter = FrameCounter()
+    notifier: can.Notifier | None = None
+    started = time.monotonic()
+    ended = started
     try:
-        with can.Notifier([bus], [writer, counter]):
-            time.sleep(duration)
+        # Count before writing so a writer failure still leaves an accurate
+        # received-frame total in the surfaced CaptureError stats.
+        notifier = can.Notifier([bus], [counter, writer])
+        with notifier:
+            deadline = started + duration
+            while True:
+                if notifier.exception is not None:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(1.0, remaining))
+        # Sample after Notifier.stop() has joined its receive thread, so frames
+        # dispatched during shutdown share the same boundary as final counts.
+        ended = time.monotonic()
     finally:
         writer.stop()
-    return counter.stats
+
+    stats = counter.stats
+    stats.rows_written = writer.rows_written
+    stats.elapsed_seconds = max(0.0, ended - started)
+    if stats.elapsed_seconds > 0:
+        stats.average_fps = stats.frames / stats.elapsed_seconds
+
+    if notifier is not None and notifier.exception is not None:
+        raise CaptureError(
+            f"CAN receive thread failed: {notifier.exception}", stats
+        ) from notifier.exception
+    return stats
