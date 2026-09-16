@@ -757,7 +757,7 @@ class BackendTests(unittest.TestCase):
 
     def test_socketcan_open_is_explicit_and_configuration_free(self) -> None:
         filters = [{"can_id": 0x123, "can_mask": 0x1FFFFFFF}]
-        sentinel_bus = object()
+        sentinel_bus = mock.Mock()
         with mock.patch.object(
             live_capture, "SocketcanBusWithOverflow", return_value=sentinel_bus
         ) as bus:
@@ -774,6 +774,28 @@ class BackendTests(unittest.TestCase):
         self.assertNotIn("data_bitrate", kwargs)
         self.assertNotIn("timing", kwargs)
         self.assertNotIn("listen_only", kwargs)
+        sentinel_bus.socket.setsockopt.assert_not_called()
+
+    def test_socketcan_open_applies_requested_receive_buffer(self) -> None:
+        sentinel_bus = mock.Mock()
+        with mock.patch.object(
+            live_capture, "SocketcanBusWithOverflow", return_value=sentinel_bus
+        ):
+            opened = live_capture.open_socketcan_bus(
+                "can0", socket_rx_buffer=1_048_576
+            )
+
+        self.assertIs(opened, sentinel_bus)
+        sentinel_bus.socket.setsockopt.assert_called_once_with(
+            socket.SOL_SOCKET, socket.SO_RCVBUF, 1_048_576
+        )
+
+    def test_socketcan_open_rejects_invalid_receive_buffer_before_open(self) -> None:
+        with mock.patch.object(live_capture, "SocketcanBusWithOverflow") as bus:
+            with self.assertRaisesRegex(ValueError, "greater than zero"):
+                live_capture.open_socketcan_bus("can0", socket_rx_buffer=0)
+
+        bus.assert_not_called()
 
     def test_socketcan_open_failure_is_clear_and_has_no_fallback(self) -> None:
         with mock.patch.object(
@@ -955,7 +977,9 @@ class BackendTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, 0)
-        opener.assert_called_once_with("vcan0", can_filters=None)
+        opener.assert_called_once_with(
+            "vcan0", can_filters=None, socket_rx_buffer=None
+        )
         passive.assert_called_once_with(
             opened_bus,
             Path(output),
@@ -975,6 +999,91 @@ class BackendTests(unittest.TestCase):
         )
         self.assertIn("rx_packets=0", stdout.getvalue())
         self.assertIn("rx_missed_errors=0", stdout.getvalue())
+
+    def test_socketcan_cli_reports_requested_and_effective_receive_buffer(self) -> None:
+        bus_context = mock.MagicMock()
+        bus_context.__enter__.return_value = object()
+        stats = live_capture.CaptureStats()
+        counters = {name: 0 for name in live_capture.NETDEVICE_RX_COUNTERS}
+        with tempfile.TemporaryDirectory(prefix="socketcan_cli_rx_buffer_") as directory:
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    capture.live_capture,
+                    "open_socketcan_bus",
+                    return_value=bus_context,
+                ) as opener,
+                mock.patch.object(
+                    capture.live_capture,
+                    "capture_passively",
+                    return_value=stats,
+                ),
+                mock.patch.object(
+                    capture.live_capture,
+                    "socketcan_receive_buffer",
+                    return_value=425_984,
+                ),
+                mock.patch.object(
+                    capture.live_capture,
+                    "snapshot_netdevice_rx_counters",
+                    side_effect=[counters, counters],
+                ),
+                mock.patch("sys.stdout", new=stdout),
+                mock.patch("sys.stderr", new=io.StringIO()),
+            ):
+                result = capture.main(
+                    [
+                        "--backend", "socketcan",
+                        "--channel", "vcan0",
+                        "--socket-rx-buffer", "1048576",
+                        "--duration", "0",
+                        "--out", str(Path(directory) / "trace.csv"),
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        opener.assert_called_once_with(
+            "vcan0", can_filters=None, socket_rx_buffer=1_048_576
+        )
+        self.assertIn(
+            "SocketCAN SO_RCVBUF: requested=1048576 bytes, "
+            "effective=425984 bytes",
+            stdout.getvalue(),
+        )
+
+    def test_socketcan_cli_rejects_invalid_receive_buffer_before_open(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(capture.live_capture, "open_socketcan_bus") as opener,
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            result = capture.main(
+                [
+                    "--backend", "socketcan",
+                    "--duration", "0",
+                    "--socket-rx-buffer", "0",
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("must be greater than zero", stderr.getvalue())
+        opener.assert_not_called()
+
+    def test_cansub_rejects_socket_receive_buffer_without_opening_bus(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(capture.live_capture, "open_cansub_bus") as cansub,
+            mock.patch.object(capture.live_capture, "open_socketcan_bus") as socketcan,
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            result = capture.main(
+                ["--duration", "0", "--socket-rx-buffer", "524288"]
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("requires --backend socketcan", stderr.getvalue())
+        cansub.assert_not_called()
+        socketcan.assert_not_called()
 
     def test_socketcan_cli_surfaces_receive_thread_failure(self) -> None:
         bus_context = mock.MagicMock()
@@ -1075,8 +1184,9 @@ class BackendTests(unittest.TestCase):
         production_source = "\n".join(
             path.read_text(encoding="utf-8") for path in source_paths
         )
-        self.assertEqual(production_source.count(".setsockopt("), 1)
+        self.assertEqual(production_source.count(".setsockopt("), 2)
         self.assertIn("SO_RXQ_OVFL", production_source)
+        self.assertIn("SO_RCVBUF", production_source)
         for source_path in source_paths:
             self.assertNotIn(
                 "ip link set", source_path.read_text(encoding="utf-8").lower()

@@ -13,6 +13,10 @@ Development suite (about 40 seconds):
 Recommended optional endurance validation (10 minutes at about 2,000 fps):
 
     .venv/bin/python -B tests/socketcan_stress.py --scenario endurance-2k-10m
+
+Compare the system default with requested receive-buffer sizes by repeating:
+
+    --socket-rx-buffer 524288 --socket-rx-buffer 1048576
 """
 from __future__ import annotations
 
@@ -150,6 +154,7 @@ class StressResult:
     sender: SenderStats
     capture_stats: live_capture.CaptureStats | None
     validation: SequenceValidation | None
+    requested_socket_receive_buffer: int | None
     socket_receive_buffer: int | None
     netdevice_rx_deltas: dict[str, int | None]
     capture_exception: str | None
@@ -558,16 +563,24 @@ def run_scenario(
     scenario: StressScenario,
     output_dir: Path,
     *,
+    socket_rx_buffer: int | None = None,
     readiness_timeout: float = RECEIVER_READY_TIMEOUT_SECONDS,
     drain_timeout: float = RECEIVER_DRAIN_TIMEOUT_SECONDS,
 ) -> StressResult:
     output_dir.mkdir(parents=True, exist_ok=True)
-    trace = output_dir / f"trace_{scenario.name}.csv"
+    buffer_suffix = (
+        "" if socket_rx_buffer is None else f"_rxbuf_{socket_rx_buffer}"
+    )
+    trace = output_dir / f"trace_{scenario.name}{buffer_suffix}.csv"
     filters = [
         {"can_id": BASE_CAN_ID + index, "can_mask": 0x7FF, "extended": False}
         for index in range(CAN_ID_COUNT)
     ]
-    receiver = live_capture.open_socketcan_bus(VCAN_CHANNEL, can_filters=filters)
+    receiver = live_capture.open_socketcan_bus(
+        VCAN_CHANNEL,
+        can_filters=filters,
+        socket_rx_buffer=socket_rx_buffer,
+    )
     thread: threading.Thread | None = None
     try:
         socket_receive_buffer = live_capture.socketcan_receive_buffer(receiver)
@@ -653,6 +666,7 @@ def run_scenario(
         sender=sender_stats,
         capture_stats=stats,
         validation=validation,
+        requested_socket_receive_buffer=socket_rx_buffer,
         socket_receive_buffer=socket_receive_buffer,
         netdevice_rx_deltas=live_capture.netdevice_rx_counter_deltas(
             rx_before, rx_after
@@ -741,12 +755,20 @@ def print_result(result: StressResult) -> None:
     )
     for failure in result.lifecycle_failures:
         print(f"lifecycle failure: {failure}")
-    buffer_text = (
+    requested_buffer_text = (
+        str(result.requested_socket_receive_buffer)
+        if result.requested_socket_receive_buffer is not None
+        else "system default"
+    )
+    effective_buffer_text = (
         str(result.socket_receive_buffer)
         if result.socket_receive_buffer is not None
         else "unavailable"
     )
-    print(f"SocketCAN SO_RCVBUF: {buffer_text}")
+    print(
+        f"SocketCAN SO_RCVBUF: requested={requested_buffer_text}, "
+        f"effective={effective_buffer_text} bytes"
+    )
     print(
         "netdevice RX deltas: "
         + ", ".join(
@@ -783,11 +805,24 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=Path,
         default=Path("temp-output/socketcan-stress"),
     )
+    parser.add_argument(
+        "--socket-rx-buffer",
+        type=int,
+        action="append",
+        metavar="BYTES",
+        help=(
+            "requested SO_RCVBUF in bytes; repeat to compare sizes "
+            "(the system-default baseline is also run)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.socket_rx_buffer and any(value <= 0 for value in args.socket_rx_buffer):
+        print("ERROR: --socket-rx-buffer must be greater than zero.", file=sys.stderr)
+        return 2
     requested = args.scenario or ["dev"]
     scenarios: list[StressScenario] = []
     for name in requested:
@@ -805,11 +840,17 @@ def main(argv: list[str] | None = None) -> int:
             scenarios.append(SCENARIOS[name])
 
     results: list[StressResult] = []
+    socket_rx_buffers = [None, *(args.socket_rx_buffer or [])]
     try:
         for scenario in scenarios:
-            result = run_scenario(scenario, args.output_dir)
-            print_result(result)
-            results.append(result)
+            for socket_rx_buffer in socket_rx_buffers:
+                result = run_scenario(
+                    scenario,
+                    args.output_dir,
+                    socket_rx_buffer=socket_rx_buffer,
+                )
+                print_result(result)
+                results.append(result)
     except (RuntimeError, OSError, ValueError) as exc:
         print(
             f"ERROR: cannot run SocketCAN stress harness on externally prepared "

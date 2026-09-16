@@ -298,7 +298,10 @@ working-directory root. Do not `cd` into the skill folder — that would create
    Experimental SocketCAN headless capture from an externally prepared interface:
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py --backend socketcan --channel can0 --duration 15 --label baseline`
    This is application receive-only and emits the same normalized trace. Hardware
-   ACK/listen-only controller mode remains an external interface setting.
+   ACK/listen-only controller mode remains an external interface setting. Add
+   `--socket-rx-buffer <bytes>` to explicitly request `SO_RCVBUF`; otherwise the
+   system default is unchanged. The command reports the effective value read back
+   from the kernel, which may cap or otherwise adjust the request.
 
 3. **Survey the bus (this BASELINE scan maps bus STRUCTURE, not the target).**
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/survey.py --trace temp-output/trace_baseline.csv --suffix steady \

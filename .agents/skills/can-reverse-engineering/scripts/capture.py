@@ -33,6 +33,9 @@ Examples:
         --duration 15 --label sniff --listen-only   # force silent
     .venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
         --backend socketcan --channel can0 --duration 15 --label baseline
+    .venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py \
+        --backend socketcan --channel can0 --socket-rx-buffer 1048576 \
+        --duration 15 --label baseline
 """
 from __future__ import annotations
 
@@ -108,12 +111,28 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bitrate", type=int)
     ap.add_argument("--data-bitrate", type=int)
     ap.add_argument("--ids", help="comma-separated hardware ID filter, e.g. 0x123,0x200")
+    ap.add_argument(
+        "--socket-rx-buffer",
+        type=int,
+        metavar="BYTES",
+        help="requested SocketCAN SO_RCVBUF in bytes (default: system setting)",
+    )
     mode_grp = ap.add_mutually_exclusive_group()
     mode_grp.add_argument("--listen-only", dest="mode", action="store_const",
                           const="silent", help="force SILENT (no ACK) - multi-node bus")
     mode_grp.add_argument("--normal", dest="mode", action="store_const",
                           const="ack", help="force NORMAL/ACK - single-node bench")
     args = ap.parse_args(argv)
+
+    if args.socket_rx_buffer is not None and args.socket_rx_buffer <= 0:
+        print("ERROR: --socket-rx-buffer must be greater than zero.", file=sys.stderr)
+        return 1
+    if args.backend != "socketcan" and args.socket_rx_buffer is not None:
+        print(
+            "ERROR: --socket-rx-buffer requires --backend socketcan.",
+            file=sys.stderr,
+        )
+        return 1
 
     out = Path(args.out) if args.out else Path(f"temp-output/trace_{args.label}.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -162,7 +181,9 @@ def main(argv: list[str] | None = None) -> int:
         rx_after = {}
         try:
             with live_capture.open_socketcan_bus(
-                channel, can_filters=can_filters
+                channel,
+                can_filters=can_filters,
+                socket_rx_buffer=args.socket_rx_buffer,
             ) as bus:
                 rx_buffer = live_capture.socketcan_receive_buffer(bus)
                 rx_before = live_capture.snapshot_netdevice_rx_counters(channel)
@@ -200,6 +221,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Rate: average={stats.average_fps:.1f} data frames/s")
         if stats.socket_receive_buffer is None:
             print("SocketCAN SO_RCVBUF: unavailable")
+        elif args.socket_rx_buffer is not None:
+            print(
+                f"SocketCAN SO_RCVBUF: requested={args.socket_rx_buffer} bytes, "
+                f"effective={stats.socket_receive_buffer} bytes"
+            )
         else:
             print(f"SocketCAN SO_RCVBUF: {stats.socket_receive_buffer} bytes")
         overflow = stats.socket_rx_queue_overflow_drops

@@ -331,18 +331,22 @@ def open_socketcan_bus(
     channel: str,
     *,
     can_filters: list[dict[str, Any]] | None = None,
+    socket_rx_buffer: int | None = None,
 ) -> can.BusABC:
     """Open an already configured SocketCAN interface for application RX only.
 
     ``fd=True`` enables receipt of CAN FD frames on interfaces that support them;
     it does not configure the controller or its bit rates.  Direct construction
     keeps ambient python-can configuration from changing the selected backend.
+    ``socket_rx_buffer`` optionally requests SO_RCVBUF on the opened raw socket.
     """
 
     if not channel.strip():
         raise RuntimeError("SocketCAN requires a non-empty interface name")
+    if socket_rx_buffer is not None and socket_rx_buffer <= 0:
+        raise ValueError("SocketCAN receive buffer must be greater than zero")
     try:
-        return SocketcanBusWithOverflow(
+        bus = SocketcanBusWithOverflow(
             channel=channel,
             fd=True,
             receive_own_messages=False,
@@ -353,6 +357,18 @@ def open_socketcan_bus(
             f"could not open SocketCAN interface {channel!r}; configure and bring "
             f"it up externally before capture ({exc})"
         ) from exc
+    if socket_rx_buffer is not None:
+        try:
+            bus.socket.setsockopt(
+                socket.SOL_SOCKET, socket.SO_RCVBUF, socket_rx_buffer
+            )
+        except (AttributeError, OSError) as exc:
+            bus.shutdown()
+            raise RuntimeError(
+                f"could not set SocketCAN SO_RCVBUF to {socket_rx_buffer} bytes "
+                f"({exc})"
+            ) from exc
+    return bus
 
 
 def socketcan_receive_buffer(bus: can.BusABC) -> int | None:

@@ -393,6 +393,36 @@ class LifecycleTests(unittest.TestCase):
         )
         self.assertTrue(receiver.shutdown_called)
 
+    def test_requested_receive_buffer_is_forwarded_and_recorded(self) -> None:
+        receiver = FakeReceiverBus()
+        patches = self._patch_runtime(receiver, self._capture_after_receive)
+        with tempfile.TemporaryDirectory(
+            prefix="socketcan_stress_rx_buffer_"
+        ) as directory:
+            with (
+                patches[0] as opener,
+                patches[1],
+                patches[2],
+                patches[3],
+                patches[4],
+            ):
+                result = socketcan_stress.run_scenario(
+                    socketcan_stress.StressScenario("buffer", 0.01, 100.0),
+                    Path(directory),
+                    socket_rx_buffer=524_288,
+                    readiness_timeout=0.1,
+                    drain_timeout=0.001,
+                )
+
+        opener.assert_called_once_with(
+            socketcan_stress.VCAN_CHANNEL,
+            can_filters=mock.ANY,
+            socket_rx_buffer=524_288,
+        )
+        self.assertEqual(result.requested_socket_receive_buffer, 524_288)
+        self.assertEqual(result.socket_receive_buffer, 212_992)
+        self.assertEqual(result.trace.name, "trace_buffer_rxbuf_524288.csv")
+
 
 class SequenceValidationTests(unittest.TestCase):
     def _write_frames(
@@ -600,6 +630,7 @@ class OutcomeTests(unittest.TestCase):
             sender=sender,
             capture_stats=capture_stats,
             validation=validation,
+            requested_socket_receive_buffer=None,
             socket_receive_buffer=212_992,
             netdevice_rx_deltas={},
             capture_exception=None,
@@ -659,6 +690,58 @@ class OutcomeTests(unittest.TestCase):
             "(observed SO_RXQ_OVFL delta through last delivered packet)",
             stdout.getvalue(),
         )
+        self.assertIn(
+            "SocketCAN SO_RCVBUF: requested=system default, "
+            "effective=212992 bytes",
+            stdout.getvalue(),
+        )
+
+
+class HarnessCliTests(unittest.TestCase):
+    def test_repeated_buffer_sizes_run_default_and_each_requested_size(self) -> None:
+        result = mock.Mock(exit_code=0)
+        with (
+            tempfile.TemporaryDirectory(prefix="socketcan_stress_matrix_") as directory,
+            mock.patch.object(
+                socketcan_stress, "run_scenario", return_value=result
+            ) as run,
+            mock.patch.object(socketcan_stress, "print_result"),
+        ):
+            exit_code = socketcan_stress.main(
+                [
+                    "--scenario", "custom",
+                    "--duration", "0.01",
+                    "--rate", "100",
+                    "--output-dir", directory,
+                    "--socket-rx-buffer", "524288",
+                    "--socket-rx-buffer", "1048576",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        scenario = socketcan_stress.StressScenario("custom", 0.01, 100.0)
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(scenario, Path(directory), socket_rx_buffer=None),
+                mock.call(scenario, Path(directory), socket_rx_buffer=524_288),
+                mock.call(scenario, Path(directory), socket_rx_buffer=1_048_576),
+            ],
+        )
+
+    def test_invalid_buffer_size_fails_without_running_scenario(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(socketcan_stress, "run_scenario") as run,
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            exit_code = socketcan_stress.main(
+                ["--scenario", "dev", "--socket-rx-buffer", "-1"]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("must be greater than zero", stderr.getvalue())
+        run.assert_not_called()
 
 
 if __name__ == "__main__":
