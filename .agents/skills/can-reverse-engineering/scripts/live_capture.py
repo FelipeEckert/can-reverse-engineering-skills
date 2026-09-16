@@ -34,10 +34,6 @@ NETDEVICE_RX_COUNTERS = (
 
 SO_RXQ_OVFL = 40
 SO_RXQ_OVFL_STRUCT = struct.Struct("@I")
-SOCKETCAN_ANCILLARY_BUFFER_SIZE = (
-    socket.CMSG_SPACE(python_can_socketcan.RECEIVED_TIMESTAMP_STRUCT.size)
-    + socket.CMSG_SPACE(SO_RXQ_OVFL_STRUCT.size)
-)
 
 
 class SocketcanBusWithOverflow(python_can_socketcan.SocketcanBus):
@@ -65,10 +61,13 @@ class SocketcanBusWithOverflow(python_can_socketcan.SocketcanBus):
         if not ready:
             return None, self._is_filtered
 
+        ancillary_buffer_size = socket.CMSG_SPACE(
+            python_can_socketcan.RECEIVED_TIMESTAMP_STRUCT.size
+        ) + socket.CMSG_SPACE(SO_RXQ_OVFL_STRUCT.size)
         try:
             frame, ancillary, msg_flags, addr = self.socket.recvmsg(
                 python_can_socketcan.constants.CANFD_MTU,
-                SOCKETCAN_ANCILLARY_BUFFER_SIZE,
+                ancillary_buffer_size,
             )
         except OSError as error:
             raise can.CanOperationError(
@@ -165,6 +164,8 @@ class CaptureStats:
     elapsed_seconds: float = 0.0
     average_fps: float = 0.0
     socket_receive_buffer: int | None = None
+    # SO_RXQ_OVFL delta observed through the last delivered packet, not an exact
+    # wall-clock capture-window drop count.
     socket_rx_queue_overflow_drops: int | None = None
     netdevice_rx_before: dict[str, int | None] = field(default_factory=dict)
     netdevice_rx_after: dict[str, int | None] = field(default_factory=dict)
@@ -407,7 +408,11 @@ def capture_passively(
     bus_channel: int | None = None,
     normalize_as_rx: bool = False,
 ) -> CaptureStats:
-    """Receive for ``duration`` seconds and write normalized data frames."""
+    """Receive for ``duration`` seconds and write normalized data frames.
+
+    The overflow metric is the SO_RXQ_OVFL delta observed through the last
+    delivered packet, not a guaranteed exact wall-clock capture-window count.
+    """
 
     if duration < 0:
         raise ValueError("duration must be non-negative")

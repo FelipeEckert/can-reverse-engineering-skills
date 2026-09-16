@@ -693,7 +693,8 @@ def print_result(result: StressResult) -> None:
             f"error_frames={stats.errors}, elapsed={stats.elapsed_seconds:.3f}s, "
             f"average={stats.average_fps:.1f} data frames/s, "
             f"socket_rx_queue_overflow_drops="
-            f"{overflow if overflow is not None else 'unavailable'}"
+            f"{overflow if overflow is not None else 'unavailable'} "
+            "(observed SO_RXQ_OVFL delta through last delivered packet)"
         )
     validation = result.validation
     if validation is None:

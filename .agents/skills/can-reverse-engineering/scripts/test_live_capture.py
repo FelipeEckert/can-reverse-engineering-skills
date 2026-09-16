@@ -4,6 +4,7 @@ import ast
 import importlib
 import io
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -316,6 +317,25 @@ class BackendTests(unittest.TestCase):
         )
         self.assertEqual(bus.socket_rx_queue_overflow_total, 0)
 
+    def test_capture_import_does_not_require_socket_cmsg_space(self) -> None:
+        code = (
+            "import socket, sys; "
+            "hasattr(socket, 'CMSG_SPACE') and delattr(socket, 'CMSG_SPACE'); "
+            f"sys.path.insert(0, {str(SCRIPT_DIR)!r}); "
+            "import capture; print('imported')"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", code],
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "imported")
+
     def test_socketcan_receive_parses_timestamp_and_overflow_ancillary_data(
         self,
     ) -> None:
@@ -341,7 +361,10 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(bus.socket_rx_queue_overflow_total, 7)
         bus.socket.recvmsg.assert_called_once_with(
             live_capture.python_can_socketcan.constants.CANFD_MTU,
-            live_capture.SOCKETCAN_ANCILLARY_BUFFER_SIZE,
+            socket.CMSG_SPACE(
+                live_capture.python_can_socketcan.RECEIVED_TIMESTAMP_STRUCT.size
+            )
+            + socket.CMSG_SPACE(live_capture.SO_RXQ_OVFL_STRUCT.size),
         )
 
     def test_socketcan_overflow_counter_accumulates_across_u32_wrap(self) -> None:
@@ -507,7 +530,7 @@ class BackendTests(unittest.TestCase):
         self.assertIsNone(stats.socket_rx_queue_overflow_drops)
         self.assertEqual(len(validated), 3)
 
-    def test_capture_reports_overflow_delta_at_final_notifier_boundary(self) -> None:
+    def test_capture_reports_overflow_delta_observed_through_last_packet(self) -> None:
         class Bus:
             socket_rx_queue_overflow_total = 2
 
@@ -946,7 +969,9 @@ class BackendTests(unittest.TestCase):
         self.assertNotIn("peak", stdout.getvalue())
         self.assertIn("SocketCAN SO_RCVBUF: 212992 bytes", stdout.getvalue())
         self.assertIn(
-            "SocketCAN RX queue overflow drops: 4", stdout.getvalue()
+            "SocketCAN RX queue overflow drops observed through last delivered "
+            "packet: 4",
+            stdout.getvalue(),
         )
         self.assertIn("rx_packets=0", stdout.getvalue())
         self.assertIn("rx_missed_errors=0", stdout.getvalue())

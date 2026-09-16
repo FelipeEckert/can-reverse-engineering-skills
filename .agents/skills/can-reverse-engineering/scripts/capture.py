@@ -204,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"SocketCAN SO_RCVBUF: {stats.socket_receive_buffer} bytes")
         overflow = stats.socket_rx_queue_overflow_drops
         print(
-            "SocketCAN RX queue overflow drops: "
+            "SocketCAN RX queue overflow drops observed through last delivered "
+            "packet: "
             f"{overflow if overflow is not None else 'unavailable'}"
         )
         delta_parts = [

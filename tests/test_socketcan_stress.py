@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -644,6 +645,20 @@ class OutcomeTests(unittest.TestCase):
         self.assertIsNone(result.overflow_matches_missing)
         self.assertEqual(result.outcome, "CAPTURE VALIDATION FAILURE")
         self.assertEqual(result.exit_code, 1)
+
+    def test_report_labels_overflow_as_observed_through_last_packet(self) -> None:
+        stdout = io.StringIO()
+
+        with mock.patch("sys.stdout", new=stdout):
+            socketcan_stress.print_result(
+                self._loss_result(overload_characterization=True)
+            )
+
+        self.assertIn(
+            "socket_rx_queue_overflow_drops=1 "
+            "(observed SO_RXQ_OVFL delta through last delivered packet)",
+            stdout.getvalue(),
+        )
 
 
 if __name__ == "__main__":
