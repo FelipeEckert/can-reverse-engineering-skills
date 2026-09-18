@@ -581,9 +581,11 @@ working-directory root. Do not `cd` into the skill folder — that would create
    family, physical scale/offset, or decoding confidence. Its JSON includes raw-range
    statistics, so `physical_hypotheses.py` consumes it directly without `--trace`.
    `physical_hypotheses.py` then enumerates common automotive factor/offset interpretations
-   in profiler order and stable hypothesis-generation order. Every result is an
-   unconfirmed **HYPOTHESIS** with factual geometry, observed behavior, decoded range, and
-   optional opendbc precedent. **Reference-free analysis is the primary discovery path:**
+   in stable hypothesis-generation rounds across profiler-ordered candidates. Its global
+   output limit is balanced this way so competing candidates remain visible; this is
+   deterministic coverage, not semantic ranking. Every result is an unconfirmed
+   **HYPOTHESIS** with factual geometry, observed behavior, decoded range, and optional
+   opendbc precedent. **Reference-free analysis is the primary discovery path:**
    do not use opendbc to guess signal meanings before the trace supports a behavior-based
    physical signal-family hypothesis. Once such a hypothesis is plausible, automatically
    consult a configured local opendbc index as secondary precedent. Treat it as supporting

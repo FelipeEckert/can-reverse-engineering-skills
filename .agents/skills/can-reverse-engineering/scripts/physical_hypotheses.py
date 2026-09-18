@@ -277,6 +277,24 @@ def corpus_console_summary(annotation: dict[str, Any]) -> str:
     return "; ".join(summaries)
 
 
+def round_robin_hypotheses(
+    hypotheses_by_candidate: list[list[dict[str, Any]]], limit: int
+) -> list[dict[str, Any]]:
+    """Apply a global limit in stable interpretation rounds across candidates."""
+
+    emitted: list[dict[str, Any]] = []
+    bounded_limit = max(1, limit)
+    rounds = max((len(rows) for rows in hypotheses_by_candidate), default=0)
+    for interpretation_index in range(rounds):
+        for candidate_rows in hypotheses_by_candidate:
+            if interpretation_index >= len(candidate_rows):
+                continue
+            emitted.append(candidate_rows[interpretation_index])
+            if len(emitted) == bounded_limit:
+                return emitted
+    return emitted
+
+
 def main() -> None:
     signals_env = (
         opendbc_prior_lookup.priors.SIGNALS_ENV
@@ -289,7 +307,10 @@ def main() -> None:
     parser.add_argument("--candidates", required=True, help="candidate JSON with field metadata")
     parser.add_argument("--trace", help="normalized webCAN CSV; required if raw ranges are absent")
     parser.add_argument("--candidate-limit", type=int, default=12)
-    parser.add_argument("--limit", type=int, default=20, help="ordered hypotheses to emit")
+    parser.add_argument(
+        "--limit", type=int, default=20,
+        help="maximum hypotheses to emit globally after round-robin candidate balancing",
+    )
     parser.add_argument("--out", default="temp-output/physical-hypotheses.json")
     parser.add_argument(
         "--opendbc-signals", type=Path,
@@ -303,7 +324,7 @@ def main() -> None:
     candidates = load_candidates(Path(args.candidates))[:max(1, args.candidate_limit)]
     groups = group_by_id(load_trace(args.trace)) if args.trace else None
     corpus_document, corpus_unavailable_reason = load_corpus_document(args.opendbc_signals)
-    hypotheses: list[dict[str, Any]] = []
+    hypotheses_by_candidate: list[list[dict[str, Any]]] = []
     for candidate_index, candidate in enumerate(candidates, 1):
         stats = raw_stats(candidate, groups)
         can_id = parse_can_id(candidate.get("id", candidate.get("id_hex")))
@@ -318,14 +339,19 @@ def main() -> None:
             "observed_behavior": observed_behavior(candidate),
             **stats,
         }
+        candidate_hypotheses: list[dict[str, Any]] = []
         for encoding in HYPOTHESIS_ENCODINGS:
             hypothesis = build_hypothesis(candidate, stats, encoding)
             hypothesis["corpus_precedent"] = corpus_precedent(
                 hypothesis, identity, corpus_document, corpus_unavailable_reason
             )
-            hypotheses.append({"candidate": identity, **hypothesis})
+            candidate_hypotheses.append({"candidate": identity, **hypothesis})
+        hypotheses_by_candidate.append(candidate_hypotheses)
 
-    hypotheses = hypotheses[:max(1, args.limit)]
+    hypotheses = round_robin_hypotheses(hypotheses_by_candidate, args.limit)
+    candidates_represented = len({
+        row["candidate"]["upstream_candidate_order"] for row in hypotheses
+    })
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -333,7 +359,7 @@ def main() -> None:
         "label": "HYPOTHESES ONLY", "disclaimer": DISCLAIMER,
         "method": "deterministic enumeration of automotive encoding hypotheses",
         "ordering": (
-            "upstream candidate input order, then stable hypothesis generation order; "
+            "stable hypothesis-generation rounds, each in upstream candidate input order; "
             "no semantic or opendbc-based ranking"
         ),
         "corpus_precedent": {
@@ -342,6 +368,7 @@ def main() -> None:
             "unavailable_reason": corpus_unavailable_reason,
         },
         "candidates_considered": len(candidates),
+        "candidates_represented": candidates_represented,
         "hypotheses_emitted": len(hypotheses),
         "physical_hypotheses": hypotheses,
     }, indent=2) + "\n")
@@ -366,10 +393,12 @@ def main() -> None:
 
     print(DISCLAIMER)
     print(
-        f"Enumerated {len(hypotheses)} hypotheses in upstream candidate order "
-        "and stable generation order."
+        f"Emitted {len(hypotheses)} hypotheses representing "
+        f"{candidates_represented}/{len(candidates)} considered candidates in stable "
+        "hypothesis-generation rounds and upstream candidate order."
     )
-    for row in hypotheses[:min(10, len(hypotheses))]:
+    preview_count = min(len(hypotheses), max(10, candidates_represented))
+    for row in hypotheses[:preview_count]:
         c = row["candidate"]
         print(
             f"HYPOTHESIS candidate {c['upstream_candidate_order']}: "

@@ -26,11 +26,14 @@ There is no physical-hypothesis score or semantic ranking. The script preserves:
 1. The upstream candidate profiler's order.
 2. The declared hypothesis-generation order within each candidate.
 
-Neither opendbc support nor any other semantic evidence changes that order or
-filters the output. The agent evaluates each interpretation from separate evidence:
-observed CAN behavior, physical plausibility of the decoded values, exact corpus
-precedent, and independent reference agreement. These dimensions are not collapsed
-into a scalar confidence value.
+The global `--limit` is applied after deterministic round-robin flattening: the first
+declared interpretation for each candidate in profiler order, then the second for each,
+and so on. This keeps competing candidates visible in bounded output while preserving
+both orders; a partial final round favors earlier upstream candidates. Neither opendbc
+support nor any other semantic evidence changes that order or filters the output. The
+agent evaluates each interpretation from separate evidence: observed CAN behavior,
+physical plausibility of the decoded values, exact corpus precedent, and independent
+reference agreement. These dimensions are not collapsed into a scalar confidence value.
 
 Short captures often exercise only a small part of a valid signal, while composite
 or over-wide fields may use a tiny fraction of their available codes. Neither fact
