@@ -215,8 +215,10 @@ When the current trace cannot distinguish candidates, do not merely ask for “m
 Before requesting another capture, state: **(1)** what ambiguity remains, **(2)** the
 competing hypotheses, **(3)** what each predicts, **(4)** the safest maneuver expected to
 separate them, and **(5)** which observed result would support or reject each hypothesis.
-Use the run number plus trace/sidecar epoch timestamps to keep a short chronological note
-of the actual maneuver segments and any deviation from the plan.
+Before Start, enter an optional short experiment note. During capture, mark only maneuver
+transitions/deviations (`baseline`, `stimulus`, `return`, `unexpected`), with a short note
+when useful. The run index stores these events on the same epoch timebase as the trace and
+sidecar; use them to compare each candidate segment by segment against the actual maneuver.
 
 Design the maneuver around the ambiguity, not a fixed signal-family recipe:
 
@@ -403,11 +405,21 @@ working-directory root. Do not `cd` into the skill folder — that would create
    passenger/operator must run this UI while the driver focuses on driving; use a
    controlled stationary/test setup whenever possible.
    **Each Start records a NEW numbered run** → `trace_run_<N>.csv` + `sidecar_run_<N>.csv`
-   (a consistent pair; nothing overwritten/mixed), **tagged holds/sweep** in
-   `runs_run.json` and listed in the UI. **Note which run number is the sweep and which is
-   the holds** — you analyse them differently below. The default `vehicle` profile
-   already makes this passive/listen-only; `--listen-only` can force that mode for
-   an individual run.
+   (a consistent pair; nothing overwritten/mixed, including after restarting Flask),
+   **tagged holds/sweep** in `runs_run.json` and listed in the UI. Add an optional short
+   experiment note before Start; while recording, use the one-click `baseline`, `stimulus`,
+   `return`, and `unexpected` markers only at transitions or deviations. The run index
+   preserves capture bounds/status/settings and timestamped events; an interrupted run is
+   retained as incomplete. Reference batches, markers, and Stop are bound to that run;
+   each reference row is bound to its run when created, and every pending batch or
+   marker retains that immutable ownership under a per-page namespaced ID.
+   Bounded request timeouts retain unacknowledged data for a safe **Retry Stop** pinned
+   to the original run, while late or mismatched requests are rejected. Teardown or
+   final-index failures leave the run incomplete or retryable rather than silently
+   complete. **Note which run
+   number is the sweep and which is the holds** — you analyse them differently below. The
+   default `vehicle` profile already makes this passive/listen-only; `--listen-only` can
+   force that mode for an individual run.
    - **Sweep run** = dense `kind=value`, no anchors → analyse **without `--ref-window`**
      (continuous). Used for identification + resolution.
    - **Holds run** = `kind=anchor` windows → analyse **with `--ref-window <window>`**.
@@ -1169,8 +1181,16 @@ is unchanged.
   `--ref-window`). Launch it **fully configured** (`--unit`, `--min/--max`,
   `--state-values`, `--window`, optional `--instructions`). Each Start writes a fresh
   numbered `trace_run_<N>.csv` + `sidecar_run_<N>.csv` pair **tagged holds/sweep**
-  (reuses `capture.resolve_config` + `bus.json`); query `/api/runs` or read
-  `runs_<label>.json` to see runs and their mode. Use `--port` if 5000 is taken;
+  (reuses `capture.resolve_config` + `bus.json`) and safely continues numbering after a
+  restart. Add an optional experiment note before Start and mark only phase transitions or
+  deviations while recording; `runs_<label>.json` stores status/timestamps/settings plus
+  generic `baseline`/`stimulus`/`return`/`unexpected` events on the shared epoch timebase.
+  Reference rows are run-bound when created; sidecar batches and markers retain that
+  immutable ownership under per-page namespaced IDs, making bounded request retries
+  idempotent. **Retry Stop** stays pinned to its original
+  run if final acknowledgement or index persistence fails. Shutdown failures are recorded
+  as incomplete. Query `/api/runs` or read that index
+  to compare candidates by maneuver segment. Use `--port` if 5000 is taken;
   capture inherits the passive `vehicle` profile by default, and `--listen-only`
   explicitly forces silent mode. (Headless twins:
   `annotate.py --mode continuous` ≈ sweep, `annotate.py --mode discrete` = momentary.)
