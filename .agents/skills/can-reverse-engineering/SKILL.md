@@ -39,9 +39,9 @@ and sidecar share a reference).
   **Offline workflow** — because cantools decodes the reference; the raw target is
   still treated as a plain field.
 - Three reference sources: a **live** human reference via the CANsub + Flask app (the
-  Workflow below); when the user already has a recorded log with a decodable
-  reference, **decode the reference from the log** (Offline workflow); or, when the
-  user has a recorded log plus a **video of a display** showing the value,
+  Live interactive workflow below); when the user already has a recorded log with a
+  decodable reference, **decode the reference from the log** (Offline workflow); or,
+  when the user has a recorded log plus a **video of a display** showing the value,
   **OCR the reference from the video** (Vision workflow). All three feed the same
   correlate → bitsearch → build_dbc → verify pipeline.
 - Handles **classical CAN and CAN FD** payloads (up to 64 bytes); fields are
@@ -78,9 +78,9 @@ plain/underscored form there, e.g. signal `gauge1`.)
 working directory** (the cwd you launched from — the same place `.venv/` lives),
 **never inside the skill**. The scripts write these paths *relative to the cwd*, so
 the rule is simply: **always run the commands from your working-directory root** (see
-the **Workflow** note on how `scripts/` resolves). Do not `cd` into the skill folder
-and do not prefix output paths with the skill path — that is what puts deliverables
-inside the skill by mistake.
+the **Live interactive workflow** note on how `scripts/` resolves). Do not `cd` into
+the skill folder and do not prefix output paths with the skill path — that is what puts
+deliverables inside the skill by mistake.
 
 Route outputs by lifetime:
 
@@ -130,9 +130,11 @@ Classify the target along two axes (see `references/re-methodology.md`):
 - **Stationary** (reproducible on a bench / while parked) vs **driving** (needs
   real operation).
 
-This picks the **reference source** and the **excitation** you ask the user to
-perform. There are two reference sources, and which you use depends on whether a
-machine reference exists, NOT on the signal being "dynamic":
+This routes the **reference source** and initial capture mode; it does not by itself
+determine the next physical maneuver. Choose later maneuvers from the specific
+competing hypotheses and the observable behavior that would distinguish them. There
+are two reference sources, and which you use depends on whether a machine reference
+exists, NOT on the signal being "dynamic":
 
 **A. Live human reference (the flask app — two excitation modes).** Launch
 `flask_sync.py` (the "CANsub Reference Generator") to digitize human input whenever you
@@ -197,10 +199,65 @@ ramp. (Same continuous path the Offline workflow uses for a decoded machine refe
 **identify the field on the SWEEP run** (`survey --suffix sweep` → `correlate` →
 `bitsearch`, no `--ref-window`), then **calibrate on the HOLDS run** (`build_dbc` /
 `calibrate`, with `--ref-window`), then `verify` on both. If results stay ambiguous
-(close bitsearch scores, low R², `verify` UNCONFIRMED, or plausibility flags), capture
-**additional runs with *different* excitation** — a slow sweep, a vigorous full-range
-sweep, another axis — and require the same field to win across runs. Each Start records a
-new numbered, tagged run pair (below), so this is cheap.
+(close bitsearch scores, low R², `verify` UNCONFIRMED, plausibility flags, or several
+candidates responding to the same maneuver), use the adaptive loop below. Each Start
+records a new numbered, tagged run pair (below), so follow-up tests are cheap.
+
+## Adaptive experiment loop
+
+Live discovery is iterative:
+
+**evidence → competing hypotheses → predicted observable behavior → safest
+discriminating maneuver → timestamped capture → candidate-by-candidate comparison →
+refine / repeat / change / stop**.
+
+When the current trace cannot distinguish candidates, do not merely ask for “more data.”
+Before requesting another capture, state: **(1)** what ambiguity remains, **(2)** the
+competing hypotheses, **(3)** what each predicts, **(4)** the safest maneuver expected to
+separate them, and **(5)** which observed result would support or reject each hypothesis.
+Use the run number plus trace/sidecar epoch timestamps to keep a short chronological note
+of the actual maneuver segments and any deviation from the plan.
+
+Design the maneuver around the ambiguity, not a fixed signal-family recipe:
+
+- Vary one primary physical input at a time when practical; keep known confounders
+  constant where practical.
+- Prefer **baseline → stimulus → baseline**, with repeated transitions. Include the
+  opposite direction or release when it has discriminating value.
+- Try a different magnitude or rate only when the hypotheses predict different behavior
+  from it; variation for its own sake is not evidence.
+- **Safety always overrides experimental purity.** Use a controlled stationary/test setup
+  or passenger/operator where appropriate, and never request an unsafe maneuver.
+
+**Repeat** the same maneuver when the capture was noisy, incomplete, poorly timed, did
+not exercise enough range/transitions, or was not reproducible. **Change** to an
+orthogonal maneuver when a clean repeat leaves candidates coupled but another safe input
+predicts different responses. **Stop and preserve the ambiguity** when no safe feasible
+maneuver can distinguish the remaining candidates. Merely correlated candidates should
+be separated experimentally when possible; candidates that remain exact mirrors under
+every feasible physical test form an **equivalence class**, not a forced single winner.
+
+### Non-prescriptive experiment examples
+
+These illustrate contrasts, not required procedures or encoding assumptions:
+
+- **Steering angle vs steering rate:** compare held left/center/right positions with the
+  movement between them; angle should persist, while rate should peak during motion and
+  return near baseline. A slower/faster repeat is useful only if rate remains ambiguous.
+- **Brake switch vs pressure/travel:** compare released, light press, hold, and release;
+  a switch changes at a threshold, while pressure/travel should vary with magnitude.
+- **Accelerator position vs torque/request:** repeat a controlled pedal change while
+  holding other conditions as constant as practical; position should follow the input,
+  while a request may show different lag or dependence on operating state.
+- **Wheel speeds vs vehicle speed:** compare straight motion with a safe gentle turn at a
+  similar overall speed; individual wheel candidates may separate while an aggregate
+  speed remains near their common motion.
+- **Gear state vs transition/command:** compare a stable state, a safe transition, and a
+  return; state should persist, while a transition/command may pulse.
+- **RPM vs engine/hybrid state:** compare not-running, stable running, and a safe RPM
+  change; RPM varies continuously, while an engine/hybrid state is typically discrete.
+- **Switches/buttons:** compare untouched baseline, press/hold, release, and repetition;
+  this separates momentary pulses, persistent state, and incrementing behavior.
 
 ## Environment — run scripts from the project venv
 
@@ -252,7 +309,7 @@ For CANsub hardware, firmware, connector, or API details not documented here,
 consult current CSS Electronics and `python-can-cansub` documentation rather than
 inferring them.
 
-## Workflow
+## Live interactive workflow
 
 **Run every command from the root of your working directory** (your cwd — where
 `.venv/`, `temp-output/`, and `decoding-output/` live), and invoke every script
@@ -389,9 +446,10 @@ working-directory root. Do not `cd` into the skill folder — that would create
    uniform-constant frame is almost always zeroed counters, and a fast frame with a
    dithering low byte is a candidate analog signal, not a counter. Emits
    `2-correlation.png` (winner boxed) — scan it for *other* candidates too. Pass
-   `--plots-dir …/analysis-plots/`. (A mirror frame — the same signal on a CAN FD and a
-   classical ID — legitimately ties this way; either carrier is valid. For a discrete
-   state with only a Holds run, add `--ref-window 2`.)
+   `--plots-dir …/analysis-plots/`. A tie may be several merely correlated signals or
+   true mirrored carriers: use a safe discriminating experiment for the former, and keep
+   the latter as an equivalence class when physical tests cannot separate them. For a
+   discrete state with only a Holds run, add `--ref-window 2`.
 
 6. **bitsearch → the canonical field (on the SWEEP run; the field of record).**
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/bitsearch.py --trace temp-output/trace_run_<sweep>.csv \
@@ -408,11 +466,14 @@ working-directory root. Do not `cd` into the skill folder — that would create
    lag-aligned linear-R² + reference-free **plausibility** (wrap-free / smooth) +
    Spearman, dedups overlapping reads, restricts boundaries to *active* bits (so it
    never grabs a constant flag/padding bit), and prints a **Decision** line stating
-   the winning permutation, the fitted scale (with sign), and why it won. Copy its
-   `build_dbc.py …` command. This — not correlate's byte guess — is the field of
-   record. (Seed `--min-len/--max-len` from the survey field map for packed
-   little-endian frames; they bound little-endian bit lengths and byte-aligned
-   big-endian widths, default `--max-len 24`.)
+   the winning permutation, the fitted scale (with sign), and why it won. This — not
+   correlate's byte guess — is the field of record **for encoding geometry**. A
+   bitsearch winner does not by itself establish the physical semantics. Do not follow
+   its printed `build_dbc.py …` command as a confident interpretation while semantic
+   ambiguity remains; first return to the adaptive loop and request a feasible
+   discriminating experiment. (Seed `--min-len/--max-len` from the survey field map
+   for packed little-endian frames; they bound little-endian bit lengths and
+   byte-aligned big-endian widths, default `--max-len 24`.)
    **Over-wide guard:** when two co-varying fields sit side by side (a wheel-speed
    *pair*, an L/R or X/Y axis), reading them together still correlates ~perfectly
    but yields a fragile field with a tiny scale (`true ÷ 256^extra`). bitsearch's
@@ -526,12 +587,15 @@ working-directory root. Do not `cd` into the skill folder — that would create
    do not use opendbc to guess signal meanings before the trace supports a behavior-based
    physical signal-family hypothesis. Once such a hypothesis is plausible, automatically
    consult a configured local opendbc index as secondary precedent. Treat it as supporting
-   evidence, never ground truth; report **exact** precedents separately from
-   **structurally relevant** precedents, and do not count multiple DBC variants from the
-   same OEM/family as independent support. Use precedent to expose ambiguities such as
-   nested/enclosing geometry, factor/offset alternatives, signedness, and common encoding
-   conventions, but do not automatically change candidate ranking solely because of
-   opendbc. Absence of the corpus or of a match is neutral evidence. Evaluate
+   evidence, never ground truth; **physical experimental evidence takes priority, and
+   opendbc must not replace a feasible discriminating experiment**. It may suggest
+   precedent or alternative interpretations to test. Report **exact** precedents
+   separately from **structurally relevant** precedents, and do not count multiple DBC
+   variants from the same OEM/family as independent support. Use precedent to expose
+   ambiguities such as nested/enclosing geometry, factor/offset alternatives,
+   signedness, and common encoding conventions, but do not automatically change
+   candidate ranking solely because of opendbc. Absence of the corpus or of a match is
+   neutral evidence. Evaluate
    interpretations from observed behavior, physical plausibility, corpus precedent, and
    independent reference evidence. When a reference becomes available, return to
    correlate → bitsearch → calibration/verification. Read
@@ -552,12 +616,14 @@ working-directory root. Do not `cd` into the skill folder — that would create
    normally; a configured index with no exact match is neutral evidence.
 
 7. **Build a single-signal DBC from bitsearch's winner** → deliverables folder.
-   A DBC may also be created from a **strong provisional hypothesis** when the user
-   requests it. In that case, the generated DBC must not imply experimental proof that
-   does not exist. If the trace cannot experimentally distinguish plausible encodings,
-   state that explicitly and keep the result provisional; record the chosen interpretation
-   without concealing alternatives. Report provenance and provisional limitations beside
-   the deliverable when they are not encoded in the DBC itself.
+   Proceed with a confident physical interpretation only after the geometry and signal
+   meaning have adequate experimental support. A DBC may also be created from a
+   **strong provisional hypothesis** when the user requests it. In that case, the
+   generated DBC must not imply experimental proof that does not exist. If the trace
+   cannot experimentally distinguish plausible encodings or physical interpretations,
+   state that explicitly and keep the result provisional; record the chosen
+   interpretation without concealing alternatives. Report provenance and provisional
+   limitations beside the deliverable when they are not encoded in the DBC itself.
    Use the geometry bitsearch found on the sweep run, but **fit scale/offset on the HOLDS
    run** (clean anchors) with `--ref-window`:
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/build_dbc.py --trace temp-output/trace_run_<holds>.csv \
@@ -634,8 +700,11 @@ working-directory root. Do not `cd` into the skill folder — that would create
    reference-free self-consistency check, and prints **PASS** (exit 0) or
    **UNCONFIRMED** (exit 2) with a recommended action. **On UNCONFIRMED, do not
    accept the field** — go back to bitsearch (try the next candidate / another
-   endianness), or ask for another excitation run (step 4), or reconsider the
-   geometry. **Never explain a low score away as "just the reference quality."**
+   endianness), reconsider the geometry, or return to the **Adaptive experiment loop**:
+   repeat for insufficient capture quality/reproducibility, change to a discriminating
+   maneuver when clean evidence leaves candidates coupled, or stop and preserve
+   ambiguity when no safe feasible experiment can separate them. **Never explain a low
+   score away as "just the reference quality."**
    The **plot overlays decoded (orange) and reference (blue) on ONE shared Y
    axis** (same physical unit) with a legend — any vertical gap is a real
    disagreement you can read at a glance, so always eyeball it. Show the PNG to the
@@ -941,8 +1010,11 @@ then measure the offset and apply it:
    round value would be the *true* wheel/ground speed. Report both, don't force the round
    scale. (A car also carries speed on SEVERAL IDs — per-wheel speeds, a cluster value, an
    OBD2 echo on `0x7E8` — so correlate legitimately returns a tie-group of real carriers;
-   confirm each with bitsearch and pick by fit + update rate. This is a genuine multi-
-   carrier tie, NOT the sparse-reference degeneracy the live-holds note warns about.)
+   confirm each with bitsearch. Fit and update rate characterize encoding quality, not
+   physical semantics. If semantics remain ambiguous, use a feasible discriminating
+   physical experiment; when none can safely separate them, preserve the carriers as an
+   equivalence class. This is a genuine multi-carrier tie, NOT the sparse-reference
+   degeneracy the live-holds note warns about.)
 
 The vision sidecar is a normal `kind=value` reference, so the whole downstream pipeline
 is unchanged.
@@ -953,7 +1025,10 @@ is unchanged.
   and `verify` (the gate) already encode the robust logic — a reference-free
   plausibility prior (wrap-free / smooth decoded series), R²-led ranking, and
   park-vs-move scoring. Don't override their conclusions with an ad-hoc check
-  (e.g. eyeballing "smoothness"); a wrong field can look locally smooth.
+  (e.g. eyeballing "smoothness"); a wrong field can look locally smooth. This does
+  **not** forbid physical reasoning: formulate falsifiable hypotheses and predicted
+  observations when they are needed to design the next experiment, then test them
+  against timestamped captures rather than promoting a visual story to a conclusion.
 - **Don't theorize from the calm baseline scan; the DELTA + correlation decide (the
   "looks like N signals" trap).** On the first, calm bus scan almost everything is
   static — the parked target included — so a byte pattern there is NOT evidence either
@@ -986,9 +1061,10 @@ is unchanged.
   several IDs routinely tie at the top; the `r2` column is what separates a genuine
   carrier (R²≈1.0) from a worse-fitting one (e.g. a speed slice at R²≈0.93). When you
   see a tie-group, **compare the `r2` column and confirm the top-R² carriers with
-  bitsearch** — don't read correlate's #1 as the answer. (A car carries speed on
-  several real IDs — per-wheel + cluster + an OBD2 echo — so a multi-carrier tie of
-  genuine carriers is normal; pick among them by fit + resolution + update rate.)
+  bitsearch** — don't read correlate's #1 as the answer. Fit, resolution, and update
+  rate compare encoding quality; use the adaptive loop to separate merely correlated
+  physical signals. If multiple carriers remain exact mirrors, report the equivalence
+  class instead of inventing a semantic winner.
 - **Read the survey ID count from its final `== N unique IDs ==` line or the survey
   JSON, never from a truncated stdout tail.** survey output is long (a per-ID table +
   a bit-packed field-map list); piping it through `tail` drops the authoritative count
@@ -996,7 +1072,10 @@ is unchanged.
   whenever you summarise a long tool output — confirm totals against the machine-
   readable artifact (the JSON), not a scrolled-off console tail.
 - **A non-round scale or an UNCONFIRMED verify means the field is probably wrong**,
-  not that the reference was bad. Loop back to bitsearch / capture another run.
+  not that the reference was bad. Loop back to bitsearch or the **Adaptive experiment
+  loop**: repeat for insufficient capture quality/reproducibility, change to a
+  discriminating maneuver when clean evidence leaves candidates coupled, or stop and
+  preserve ambiguity when no safe feasible experiment can separate them.
   (Caveat: *round* doesn't prove *right* — an over-wide read of a `2^−j`-scaled
   field keeps a binary-fraction scale. bitsearch's parsimony rule, not the scale
   check, is what demotes that; see step 6 and `references/signal-encoding.md`.)
