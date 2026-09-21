@@ -239,6 +239,30 @@ maneuver can distinguish the remaining candidates. Merely correlated candidates 
 be separated experimentally when possible; candidates that remain exact mirrors under
 every feasible physical test form an **equivalence class**, not a forced single winner.
 
+### Guided live experiment
+
+For a specific follow-up test, write a small version-1 JSON plan under `temp-output/`
+with an `objective`, optional `context`, and ordered `steps`. Each step has a `phase`
+(`baseline`, `stimulus`, or `return`), an operator-facing `instruction`, and optional
+`expected_observation` / `reason`. Keep the plan hypothesis-driven and concise; never put
+automatic vehicle actions or timers in it. Launch the existing UI with
+`flask_sync.py --experiment-plan <plan.json>` plus its normal reference options.
+
+After launch, poll the printed local HTTP URL with a bounded wait until it responds, then
+give the URL to the operator and open it when a graphical session and the available tools
+permit; otherwise ask the operator to open it. Do not start a duplicate server when the
+port is occupied. Keep the server process/session alive until the operator has used the
+UI's **Stop Capture** successfully (including any **Retry Stop**).
+
+The operator starts one CAN capture for the whole plan. For each displayed step they
+click **Start Maneuver**, perform the physical action, then click **Finish Maneuver**;
+these buttons only persist timestamped start/finish events and never control the vehicle
+or CAN backend. Progress advances only after server acknowledgement. `unexpected` stays
+available without advancing the plan, and Stop remains available even with an unfinished
+step. The run index stores the static plan plus each step's `step` and `boundary`, so use
+the resulting intervals for candidate-by-candidate comparison. Holds/Sweep remain an
+independent reference facility. Without `--experiment-plan`, use the unchanged manual UI.
+
 ### Non-prescriptive experiment examples
 
 These illustrate contrasts, not required procedures or encoding assumptions:
@@ -424,6 +448,9 @@ working-directory root. Do not `cd` into the skill folder — that would create
      (continuous). Used for identification + resolution.
    - **Holds run** = `kind=anchor` windows → analyse **with `--ref-window <window>`**.
      Used for calibration + absolute verify.
+   For a hypothesis-driven follow-up, add `--experiment-plan temp-output/<plan>.json` as
+   described in **Guided live experiment**. One Start/Stop capture spans all plan steps;
+   the maneuver buttons mark step boundaries and do not replace capture Start/Stop.
    Headless alternative: `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/capture.py --duration 60 --label run` plus
    `.venv/bin/python .agents/skills/can-reverse-engineering/scripts/annotate.py --mode continuous --label run` (the slider's headless twin —
    keyboard-driven dense `kind=value` + parked-value heartbeat).
@@ -1179,12 +1206,15 @@ is unchanged.
   known value → `kind=anchor` windows (analyse with `--ref-window`); **SWEEP** = drag a
   vertical slider → dense `kind=value` at ~20 Hz, no anchors (analyse WITHOUT
   `--ref-window`). Launch it **fully configured** (`--unit`, `--min/--max`,
-  `--state-values`, `--window`, optional `--instructions`). Each Start writes a fresh
+  `--state-values`, `--window`, optional `--instructions`; add `--experiment-plan
+  <json-file>` for an agent-prepared guided sequence). Each Start writes a fresh
   numbered `trace_run_<N>.csv` + `sidecar_run_<N>.csv` pair **tagged holds/sweep**
   (reuses `capture.resolve_config` + `bus.json`) and safely continues numbering after a
   restart. Add an optional experiment note before Start and mark only phase transitions or
   deviations while recording; `runs_<label>.json` stores status/timestamps/settings plus
   generic `baseline`/`stimulus`/`return`/`unexpected` events on the shared epoch timebase.
+  A guided run additionally snapshots the plan and stores acknowledged `start`/`finish`
+  boundaries for each numbered step; manual mode is unchanged.
   Reference rows are run-bound when created; sidecar batches and markers retain that
   immutable ownership under per-page namespaced IDs, making bounded request retries
   idempotent. **Retry Stop** stays pinned to its original

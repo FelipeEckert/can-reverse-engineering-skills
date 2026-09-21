@@ -34,6 +34,11 @@ markers for experiment chronology. This makes multi-run / multi-excitation captu
 (recommended when one run is ambiguous) clean: capture a few discriminating runs,
 then compare candidates against the marked maneuver segments.
 
+GUIDED EXPERIMENTS: --experiment-plan accepts a versioned JSON objective and ordered
+baseline/stimulus/return steps. One CAN capture spans the plan; operator-confirmed
+Start/Finish Maneuver actions add retry-safe timestamp boundaries to the same run index.
+They never start/stop CAN capture or automate a physical action.
+
 The CANsub clock is set to host time on connect, so trace and sidecar share a
 reference. Capture uses the silent/ACK mode from bus.json (vehicle->silent,
 bench->ACK); override with --listen-only / --normal.
@@ -62,6 +67,81 @@ import common  # CANsub registration is deferred until live capture starts.
 import capture
 
 ASSETS = str(Path(__file__).resolve().parent.parent / "assets")
+PLAN_PHASES = frozenset({"baseline", "stimulus", "return"})
+PLAN_BOUNDARIES = frozenset({"start", "finish"})
+
+
+def _plan_text(value, field: str, *, required: bool, limit: int) -> str | None:
+    if value is None and not required:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    value = value.strip()
+    if required and not value:
+        raise ValueError(f"{field} must not be empty")
+    if len(value) > limit:
+        raise ValueError(f"{field} must be at most {limit} characters")
+    return value or None
+
+
+def normalize_experiment_plan(document: dict) -> dict:
+    """Validate and normalize the small, versioned guided-experiment schema."""
+    if not isinstance(document, dict):
+        raise ValueError("experiment plan must be a JSON object")
+    allowed = {"version", "objective", "context", "steps"}
+    unknown = set(document) - allowed
+    if unknown:
+        raise ValueError(f"unknown experiment-plan field(s): {', '.join(sorted(unknown))}")
+    version = document.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        raise ValueError("experiment plan version must be 1")
+    objective = _plan_text(document.get("objective"), "objective", required=True, limit=500)
+    context = _plan_text(document.get("context"), "context", required=False, limit=1000)
+    source_steps = document.get("steps")
+    if not isinstance(source_steps, list) or not source_steps:
+        raise ValueError("experiment plan steps must be a non-empty array")
+    if len(source_steps) > 100:
+        raise ValueError("experiment plan must contain at most 100 steps")
+    steps = []
+    step_allowed = {"phase", "instruction", "expected_observation", "reason"}
+    for number, source in enumerate(source_steps, start=1):
+        if not isinstance(source, dict):
+            raise ValueError(f"step {number} must be an object")
+        unknown = set(source) - step_allowed
+        if unknown:
+            raise ValueError(
+                f"unknown field(s) in step {number}: {', '.join(sorted(unknown))}")
+        phase = source.get("phase")
+        if not isinstance(phase, str) or phase not in PLAN_PHASES:
+            raise ValueError(
+                f"step {number} phase must be one of: {', '.join(sorted(PLAN_PHASES))}")
+        step = {
+            "phase": phase,
+            "instruction": _plan_text(
+                source.get("instruction"), f"step {number} instruction",
+                required=True, limit=500),
+        }
+        for field in ("expected_observation", "reason"):
+            value = _plan_text(
+                source.get(field), f"step {number} {field}", required=False, limit=500)
+            if value:
+                step[field] = value
+        steps.append(step)
+    plan = {"version": 1, "objective": objective, "steps": steps}
+    if context:
+        plan["context"] = context
+    return plan
+
+
+def load_experiment_plan(path: str | Path) -> dict:
+    path = Path(path)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"cannot read experiment plan {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid experiment plan JSON {path}: {exc}") from exc
+    return normalize_experiment_plan(document)
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>CANsub Reference Generator</title>
@@ -98,6 +178,21 @@ PAGE = """<!doctype html>
               border-radius:7px; padding:8px 10px; font-size:.85rem; }
   .instr { padding: 10px 16px; background: #eef6ff; border-bottom: 1px solid #d8e6f5;
            color: #244; font-size: .74rem; white-space: pre-line; }
+  .guide { margin:10px 16px; padding:14px 16px; border:2px solid var(--blue);
+           border-radius:12px; background:#f7fbff; }
+  .guide-objective { font-weight:700; font-size:1rem; }
+  .guide-context, .guide-detail { margin-top:4px; color:#5b6573; font-size:.82rem; }
+  .guide-head { display:flex; align-items:center; gap:10px; margin-top:12px; }
+  .guide-step { font-weight:700; }
+  .guide-phase { padding:3px 8px; border-radius:999px; background:#dcecff;
+                 color:#245b8f; font-size:.78rem; font-weight:700; text-transform:uppercase; }
+  .guide-instruction { margin:10px 0; font-size:1.25rem; font-weight:700; }
+  .guide-live { color:var(--red); font-weight:800; min-height:1.2em; }
+  #maneuver-btn { margin-top:10px; padding:11px 18px; border:0; border-radius:9px;
+                  background:var(--blue); color:#fff; font-weight:800; cursor:pointer; }
+  #maneuver-btn.finish { background:var(--red); }
+  #maneuver-btn:disabled { opacity:.5; cursor:default; }
+  #guide-status { margin-left:10px; color:#5b6573; font-size:.82rem; }
   .chronology { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:8px 16px;
                 border-bottom:1px solid #e2e5ea; background:#fbfcfd; font-size:.8rem; }
   .chronology button { border:1px solid #ccd2da; border-radius:7px; background:#fff;
@@ -165,11 +260,28 @@ PAGE = """<!doctype html>
   </div>
 </div>
 <div class="instr" id="instr">{{instructions}}</div>
+{% if experiment_plan %}
+<div class="guide" id="guide">
+  <div class="guide-objective" id="guide-objective"></div>
+  <div class="guide-context" id="guide-context"></div>
+  <div class="guide-head"><span class="guide-step" id="guide-step"></span>
+    <span class="guide-phase" id="guide-phase"></span></div>
+  <div class="guide-instruction" id="guide-instruction"></div>
+  <div class="guide-detail" id="guide-expected"></div>
+  <div class="guide-detail" id="guide-reason"></div>
+  <div class="guide-live" id="guide-live"></div>
+  <button id="maneuver-btn" disabled>START MANEUVER</button><span id="guide-status"></span>
+</div>
+{% endif %}
 <div class="chronology">
+{% if experiment_plan %}
+  <span>Mark a deviation:</span>
+{% else %}
   <span>Mark transitions/deviations:</span>
   <button class="phasebtn" data-phase="baseline" disabled>baseline</button>
   <button class="phasebtn" data-phase="stimulus" disabled>stimulus</button>
   <button class="phasebtn" data-phase="return" disabled>return</button>
+{% endif %}
   <button class="phasebtn" data-phase="unexpected" disabled>unexpected</button>
   <input id="event-note" class="event-note" maxlength="200" disabled
          placeholder="optional short event note">
@@ -201,6 +313,7 @@ const CFG = {
   stateValues: {{ state_values | tojson }}, heartbeatMs: 250,
   holdWindowMs: {{ hold_window_ms }}, holdGuardMs: {{ hold_guard_ms }},
   mode: {{ mode | tojson }}, sweepMs: 50,
+  experimentPlan: {{ experiment_plan | tojson }},
 };
 let vmin = CFG.vmin, vmax = CFG.vmax, unit = CFG.unit;
 const now = () => Date.now() / 1000;
@@ -292,6 +405,14 @@ let stopPending = false;
 let stopRun = null;
 let batchSeq = 0;
 let eventSeq = 0;
+const pendingEvents = new Map();
+const eventRequests = new Set();
+const guided = CFG.experimentPlan !== null;
+let planProgress = guided
+  ? {step: 1, total: CFG.experimentPlan.steps.length, state: 'before'} : null;
+let planRun = null;
+let pendingGuideEvent = null;
+let maneuverBusy = false;
 const CLIENT_NAMESPACE = (globalThis.crypto && crypto.randomUUID)
   ? crypto.randomUUID()
   : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
@@ -299,10 +420,74 @@ const capbtn = document.getElementById('capbtn');
 const capstatus = document.getElementById('capstatus');
 const fmtTime = s => { s=Math.floor(s); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); };
 const dot = document.getElementById('dot');
+function guidedTransitionApplied(progress, event){
+  if (!progress || !event) return false;
+  if (event.boundary === 'start')
+    return progress.state === 'active' && progress.step === event.step
+      || progress.state === 'complete' || progress.step > event.step;
+  return progress.state === 'complete' || progress.step > event.step;
+}
+function renderGuide(){
+  if (!guided) return;
+  const plan = CFG.experimentPlan;
+  document.getElementById('guide-objective').textContent = plan.objective;
+  const context = document.getElementById('guide-context');
+  context.textContent = plan.context || ''; context.style.display = plan.context ? '' : 'none';
+  const button = document.getElementById('maneuver-btn');
+  const live = document.getElementById('guide-live');
+  const status = document.getElementById('guide-status');
+  if (planProgress.state === 'complete'){
+    const last = plan.steps[plan.steps.length - 1];
+    document.getElementById('guide-step').textContent = 'Step ' + plan.steps.length + '/' + plan.steps.length;
+    document.getElementById('guide-phase').textContent = last.phase;
+    document.getElementById('guide-instruction').textContent = 'Experiment plan complete';
+    document.getElementById('guide-expected').textContent = '';
+    document.getElementById('guide-reason').textContent = '';
+    live.textContent = ''; button.disabled = true; button.className = '';
+    button.textContent = 'PLAN COMPLETE'; status.textContent = 'Stop Capture when ready';
+    return;
+  }
+  const step = plan.steps[planProgress.step - 1];
+  document.getElementById('guide-step').textContent =
+    'Step ' + planProgress.step + '/' + plan.steps.length;
+  document.getElementById('guide-phase').textContent = step.phase;
+  document.getElementById('guide-instruction').textContent = step.instruction;
+  document.getElementById('guide-expected').textContent = step.expected_observation
+    ? 'Expected: ' + step.expected_observation : '';
+  document.getElementById('guide-reason').textContent = step.reason ? 'Why: ' + step.reason : '';
+  const active = planProgress.state === 'active';
+  live.textContent = active ? '● CAPTURING CAN DATA' : '';
+  button.className = active ? 'finish' : '';
+  const boundary = active ? 'FINISH' : 'START';
+  button.textContent = maneuverBusy && pendingGuideEvent
+    ? 'SAVING ' + pendingGuideEvent.boundary.toUpperCase() + '…'
+    : pendingGuideEvent
+      ? 'RETRY ' + pendingGuideEvent.boundary.toUpperCase() + ' MANEUVER'
+      : boundary + ' MANEUVER';
+  button.disabled = !capturing || maneuverBusy;
+  if (!capturing) status.textContent = stopPending ? 'Stop is pending' : 'Start Capture first';
+  else if (!pendingGuideEvent && !maneuverBusy) status.textContent = '';
+}
+function progressRank(progress){
+  return progress.state === 'complete' ? progress.total * 2
+    : (progress.step - 1) * 2 + (progress.state === 'active' ? 1 : 0);
+}
+function applyPlanProgress(progress, run){
+  if (!guided || !progress) return;
+  if (planRun === run && progressRank(progress) < progressRank(planProgress)) return;
+  planRun = run;
+  planProgress = progress;
+  if (guidedTransitionApplied(progress, pendingGuideEvent)){
+    pendingEvents.delete(pendingGuideEvent.id);
+    pendingGuideEvent = null;
+  }
+  renderGuide();
+}
 function applyCapState(s){
   const serverRunning = !!s.running;
   capturing = stopPending ? false : serverRunning;
   if (!stopPending && serverRunning && s.run) activeRun = s.run;
+  if (s.plan_progress) applyPlanProgress(s.plan_progress, s.run);
   const mh = document.getElementById('mode-holds'), ms = document.getElementById('mode-sweep');
   if (mh) mh.disabled = capturing; if (ms) ms.disabled = capturing;
   document.getElementById('experiment-note').disabled = capturing || stopPending;
@@ -317,6 +502,7 @@ function applyCapState(s){
     capstatus.className = s.errors ? 'err' : 'live'; dot.className = s.errors ? 'bad' : 'ok'; }
   else if (s.frames){ capstatus.textContent = runtxt + 'stopped · ' + s.frames.toLocaleString() + ' frames'; capstatus.className = ''; }
   else { capstatus.textContent = 'idle'; capstatus.className = ''; }
+  renderGuide();
 }
 async function loadDevice(){
   try {
@@ -374,6 +560,7 @@ async function toggleCapture(){
       requireAcknowledged(result.accepted_batch_ids, batches.map(b => b.id), 'reference batch');
       requireAcknowledged(result.accepted_event_ids, events.map(e => e.id), 'event marker');
       pendingBatches.clear(); pendingEvents.clear();
+      pendingGuideEvent = null; maneuverBusy = false;
       stopPending = false;
       stopRun = null;
       activeRun = null;
@@ -383,6 +570,7 @@ async function toggleCapture(){
       if (!result.running || !result.run) throw new Error(result.error || 'capture did not start');
       activeRun = result.run; batchSeq = 0; eventSeq = 0;
       pendingBatches.clear(); pendingEvents.clear(); stopPending = false; stopRun = null;
+      pendingGuideEvent = null; maneuverBusy = false;
     }
     applyCapState(result);
     if (capturing && !wasCapturing){          // just started a fresh run
@@ -401,7 +589,18 @@ async function toggleCapture(){
   finally { busy = false; capbtn.disabled = false; }
 }
 capbtn.addEventListener('click', toggleCapture);
-setInterval(async () => { if (busy) return; try { const r = await fetch('/api/capture/status'); applyCapState(await r.json()); } catch(e){} }, 1000);
+let statusPolling = false;
+async function loadCaptureStatus(){
+  if (busy || statusPolling) return;
+  statusPolling = true;
+  try {
+    const r = await fetch('/api/capture/status');
+    const status = await r.json();
+    if (!busy) applyCapState(status);
+  } catch(e){} finally { statusPolling = false; }
+}
+loadCaptureStatus();
+setInterval(loadCaptureStatus, 1000);
 
 async function loadRuns(){
   try { const d = await (await fetch('/api/runs')).json();
@@ -459,12 +658,11 @@ function flushRows(){
 setInterval(() => { if (capturing) flushRows(); }, 150);
 
 // Sparse maneuver chronology: mark transitions/deviations, not every sample.
-const pendingEvents = new Map();
-const eventRequests = new Set();
 async function sendEvent(event){
   const result = await requestJson('/api/event', {run: event.run, event});
   requireAcknowledged(result.accepted_event_ids, [event.id], 'event marker');
   pendingEvents.delete(event.id);
+  return result;
 }
 async function settleEventRequests(){
   await Promise.allSettled(Array.from(eventRequests));
@@ -486,6 +684,34 @@ document.querySelectorAll('.phasebtn').forEach(button => {
     eventRequests.add(request);
   });
 });
+if (guided){
+  const maneuverButton = document.getElementById('maneuver-btn');
+  maneuverButton.addEventListener('click', () => {
+    if (!capturing || maneuverBusy || planProgress.state === 'complete') return;
+    if (!pendingGuideEvent){
+      const step = CFG.experimentPlan.steps[planProgress.step - 1];
+      const boundary = planProgress.state === 'active' ? 'finish' : 'start';
+      const run = activeRun;
+      const id = String(run) + ':' + CLIENT_NAMESPACE + ':' + String(++eventSeq);
+      pendingGuideEvent = {id, run, epoch: now(), phase: step.phase,
+        step: planProgress.step, boundary};
+      pendingEvents.set(id, pendingGuideEvent);
+    }
+    const event = pendingGuideEvent;
+    maneuverBusy = true; renderGuide();
+    const request = sendEvent(event)
+      .then(result => {
+        applyPlanProgress(result.plan_progress, event.run);
+        document.getElementById('guide-status').textContent = '✓ boundary saved';
+      })
+      .catch(e => {
+        document.getElementById('guide-status').textContent = '⚠ ' + e;
+      })
+      .finally(() => { maneuverBusy = false; eventRequests.delete(request); renderGuide(); });
+    eventRequests.add(request);
+  });
+  renderGuide();
+}
 
 // --- uPlot ---
 const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n);
@@ -631,11 +857,14 @@ class CaptureController:
     EVENT_PHASES = frozenset({"baseline", "stimulus", "return", "unexpected"})
 
     def __init__(self, label: str, outdir: Path, mode_override: bool | None = None,
-                 reference_settings: dict | None = None):
+                 reference_settings: dict | None = None,
+                 experiment_plan: dict | None = None):
         self.label = label
         self.outdir = Path(outdir)
         self.mode_override = mode_override
         self.reference_settings = dict(reference_settings or {})
+        self.experiment_plan = (
+            normalize_experiment_plan(experiment_plan) if experiment_plan is not None else None)
         self.listen_only = None
         self.run_n = 0
         self.note = ""
@@ -704,6 +933,8 @@ class CaptureController:
                 clean_note = str(experiment_note or "").strip()
                 if clean_note:
                     record["experiment_note"] = clean_note[:200]
+                if self.experiment_plan is not None:
+                    record["experiment_plan"] = json.loads(json.dumps(self.experiment_plan))
                 self._replace_run(record)
                 self._write_index()
                 self._final_persisted[self.run_n] = False
@@ -767,6 +998,8 @@ class CaptureController:
                        "started_at": self.started_at, "ended_at": None,
                        "duration_s": None, "errors": 0,
                        "reference_settings": dict(self.reference_settings), "events": []}
+                if self.experiment_plan is not None:
+                    rec["experiment_plan"] = json.loads(json.dumps(self.experiment_plan))
             started_at = self.started_at
             # Notifier.stop() drains/stops delivery; close the logger and bus before
             # sampling counters and the final boundary so metadata brackets the trace.
@@ -818,6 +1051,24 @@ class CaptureController:
             return event_id
 
     def _accept_event(self, run_id: int, event: dict) -> tuple[str, bool]:
+        record = self._current_record()
+        if record is None:
+            raise RunConflictError(f"run {run_id} has no active record")
+        event_id, stored = self._event_payload(run_id, event, record)
+        digest = self._digest(stored)
+        accepted = self._accepted_events.setdefault(run_id, {})
+        if event_id in accepted:
+            if accepted[event_id] != digest:
+                raise RunConflictError(f"event id {event_id!r} was reused with different data")
+            return event_id, True
+        self._validate_plan_transition(record, stored)
+        record.setdefault("events", []).append(stored)
+        record["events"].sort(key=lambda item: item["epoch"])
+        accepted[event_id] = digest
+        return event_id, False
+
+    def _event_payload(self, run_id: int, event: dict,
+                       record: dict) -> tuple[str, dict]:
         if not isinstance(event, dict):
             raise ValueError("event must be an object")
         event_id = self._item_id(event, "event", run_id)
@@ -831,19 +1082,101 @@ class CaptureController:
         clean_note = str(event.get("note", "") or "").strip()
         if clean_note:
             stored["note"] = clean_note[:200]
-        digest = self._digest(stored)
-        accepted = self._accepted_events.setdefault(run_id, {})
-        if event_id in accepted:
-            if accepted[event_id] != digest:
-                raise RunConflictError(f"event id {event_id!r} was reused with different data")
-            return event_id, True
-        record = self._current_record()
-        if record is None:
-            raise RunConflictError(f"run {run_id} has no active record")
-        record.setdefault("events", []).append(stored)
-        record["events"].sort(key=lambda item: item["epoch"])
-        accepted[event_id] = digest
-        return event_id, False
+        plan = record.get("experiment_plan")
+        has_step = "step" in event
+        has_boundary = "boundary" in event
+        if plan is None:
+            if has_step or has_boundary:
+                raise ValueError("planned step boundaries require an experiment plan")
+            return event_id, stored
+        if phase == "unexpected":
+            if has_step or has_boundary:
+                raise ValueError("unexpected markers cannot be planned step boundaries")
+            return event_id, stored
+        if not has_step or not has_boundary:
+            raise ValueError("guided phase events require step and boundary")
+        step = event.get("step")
+        if isinstance(step, bool) or not (
+                isinstance(step, int) or (isinstance(step, str) and step.isdigit())):
+            raise ValueError("event step must be an integer")
+        step = int(step)
+        if step < 1 or step > len(plan["steps"]):
+            raise ValueError(f"event step must be between 1 and {len(plan['steps'])}")
+        boundary = event.get("boundary")
+        if not isinstance(boundary, str) or boundary not in PLAN_BOUNDARIES:
+            raise ValueError(
+                f"event boundary must be one of: {', '.join(sorted(PLAN_BOUNDARIES))}")
+        stored.update(step=step, boundary=boundary)
+        return event_id, stored
+
+    @staticmethod
+    def _guided_progress(record: dict) -> dict | None:
+        plan = record.get("experiment_plan")
+        if plan is None:
+            return None
+        steps = plan["steps"]
+        boundaries: dict[tuple[int, str], dict] = {}
+        for event in record.get("events", []):
+            if "step" not in event and "boundary" not in event:
+                continue
+            if "step" not in event or "boundary" not in event:
+                raise RunConflictError("stored guided event has an incomplete boundary")
+            step = event["step"]
+            boundary = event["boundary"]
+            if (not isinstance(step, int) or isinstance(step, bool)
+                    or step < 1 or step > len(steps)
+                    or not isinstance(boundary, str)
+                    or boundary not in PLAN_BOUNDARIES):
+                raise RunConflictError("stored guided event has an invalid boundary")
+            if event.get("phase") != steps[step - 1]["phase"]:
+                raise RunConflictError(f"stored phase does not match experiment-plan step {step}")
+            key = (step, boundary)
+            if key in boundaries:
+                raise RunConflictError(
+                    f"step {step} already has a {boundary} boundary")
+            boundaries[key] = event
+        for step in range(1, len(steps) + 1):
+            started = boundaries.get((step, "start"))
+            finished = boundaries.get((step, "finish"))
+            later = any(number > step for number, _ in boundaries)
+            if finished is not None and started is None:
+                raise RunConflictError(f"step {step} was finished before it was started")
+            if started is None:
+                if later:
+                    raise RunConflictError(f"stored guided events skip step {step}")
+                return {"step": step, "total": len(steps), "state": "before"}
+            if finished is None:
+                if later:
+                    raise RunConflictError(f"stored guided events advance before step {step} finishes")
+                return {"step": step, "total": len(steps), "state": "active"}
+            if finished["epoch"] < started["epoch"]:
+                raise RunConflictError(f"step {step} finish boundary predates its start")
+        return {"step": len(steps), "total": len(steps), "state": "complete"}
+
+    def _validate_plan_transition(self, record: dict, event: dict) -> None:
+        plan = record.get("experiment_plan")
+        if plan is None or event["phase"] == "unexpected":
+            return
+        progress = self._guided_progress(record)
+        if progress["state"] == "complete":
+            raise RunConflictError("experiment plan is already complete")
+        step = event["step"]
+        if step != progress["step"]:
+            raise RunConflictError(
+                f"expected experiment-plan step {progress['step']}, got step {step}")
+        expected_phase = plan["steps"][step - 1]["phase"]
+        if event["phase"] != expected_phase:
+            raise RunConflictError(
+                f"step {step} phase must be {expected_phase!r}, got {event['phase']!r}")
+        expected_boundary = "finish" if progress["state"] == "active" else "start"
+        if event["boundary"] != expected_boundary:
+            raise RunConflictError(
+                f"step {step} expects {expected_boundary}, got {event['boundary']}")
+        if expected_boundary == "finish":
+            started = next(item for item in record["events"]
+                           if item.get("step") == step and item.get("boundary") == "start")
+            if event["epoch"] < started["epoch"]:
+                raise RunConflictError(f"step {step} finish boundary predates its start")
 
     def _accept_batch(self, run_id: int, batch: dict) -> tuple[str, int]:
         if not isinstance(batch, dict):
@@ -962,18 +1295,25 @@ class CaptureController:
 
     def _confirm_events(self, run_id: int, events: list[dict]) -> list[str]:
         accepted = self._accepted_events.get(run_id, {})
+        record = self._record_for_run(run_id)
+        if record is None:
+            raise RunConflictError(f"run {run_id} has no record")
         confirmed = []
         for event in events:
-            event_id = self._item_id(event, "event", run_id)
-            stored = {"epoch": float(event.get("epoch")), "phase": event.get("phase", "")}
-            clean_note = str(event.get("note", "") or "").strip()
-            if clean_note:
-                stored["note"] = clean_note[:200]
+            event_id, stored = self._event_payload(run_id, event, record)
             if accepted.get(event_id) != self._digest(stored):
                 raise RunConflictError(
                     f"run {run_id} is complete and event {event_id!r} was not accepted")
             confirmed.append(event_id)
         return confirmed
+
+    def plan_progress(self, run_id: int) -> dict | None:
+        with self._lock:
+            run_id = self._run_id(run_id)
+            record = self._record_for_run(run_id)
+            if record is None:
+                raise RunConflictError(f"run {run_id} has no record")
+            return self._guided_progress(record)
 
     def status(self) -> dict:
         with self._lock:
@@ -1031,7 +1371,7 @@ class CaptureController:
 
     def _record_status(self, record: dict, accepted_batches: list[str],
                        accepted_events: list[str]) -> dict:
-        return {
+        status = {
             "running": False,
             "run": self._record_run(record),
             "status": record.get("status"),
@@ -1044,6 +1384,10 @@ class CaptureController:
             "accepted_batch_ids": accepted_batches,
             "accepted_event_ids": accepted_events,
         }
+        progress = self._guided_progress(record)
+        if progress is not None:
+            status["plan_progress"] = progress
+        return status
 
     def _replace_run(self, record: dict) -> None:
         number = self._record_run(record)
@@ -1072,11 +1416,17 @@ class CaptureController:
         frames = self.counter.n if self.counter else 0
         errors = self.counter.errors if self.counter else 0
         elapsed = (time.time() - self.started_at) if self.started_at else 0.0
-        return {"running": self.running, "run": self.run_n, "frames": frames,
-                "errors": errors, "listen_only": self.listen_only,
-                "elapsed": round(elapsed, 1),
-                "trace": str(self.current_trace) if self.current_trace else "",
-                "error": self.error}
+        status = {"running": self.running, "run": self.run_n, "frames": frames,
+                  "errors": errors, "listen_only": self.listen_only,
+                  "elapsed": round(elapsed, 1),
+                  "trace": str(self.current_trace) if self.current_trace else "",
+                  "error": self.error}
+        record = self._current_record()
+        if record is not None:
+            progress = self._guided_progress(record)
+            if progress is not None:
+                status["plan_progress"] = progress
+        return status
 
 
 def _fmt_rate(hz: int) -> str:
@@ -1156,7 +1506,8 @@ def make_app(controller: CaptureController, label: str, unit: str,
             PAGE, label=label, unit=unit, vmin=vmin, vmax=vmax,
             nstates=nstates, state_values=state_values, instructions=instructions,
             hold_window=f"{hold_window:g}", hold_window_ms=int(hold_window * 1000),
-            hold_guard_ms=int(hold_guard * 1000), mode=mode)
+            hold_guard_ms=int(hold_guard * 1000), mode=mode,
+            experiment_plan=controller.experiment_plan)
 
     @app.post("/api/log")
     def log():
@@ -1199,7 +1550,11 @@ def make_app(controller: CaptureController, label: str, unit: str,
             return jsonify(ok=False, error=str(exc)), 409
         except (KeyError, TypeError, ValueError) as exc:
             return jsonify(ok=False, error=str(exc)), 400
-        return jsonify(ok=True, accepted_event_ids=[event_id])
+        response = {"ok": True, "accepted_event_ids": [event_id]}
+        progress = controller.plan_progress(data.get("run"))
+        if progress is not None:
+            response["plan_progress"] = progress
+        return jsonify(response)
 
     @app.get("/api/capture/status")
     def cap_status():
@@ -1246,6 +1601,8 @@ def main() -> int:
     ap.add_argument("--guard", type=float, default=0.0,
                     help="holds: seconds to skip at the start of each window (click jitter)")
     ap.add_argument("--instructions", help="override the on-screen instruction banner")
+    ap.add_argument("--experiment-plan", metavar="JSON_FILE",
+                    help="guided maneuver plan (versioned JSON); capture still starts/stops manually")
     mode_grp = ap.add_mutually_exclusive_group()
     mode_grp.add_argument("--listen-only", dest="busmode", action="store_const",
                           const="silent", help="force SILENT (no ACK) - multi-node bus")
@@ -1254,6 +1611,12 @@ def main() -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5000)
     args = ap.parse_args()
+
+    try:
+        experiment_plan = (
+            load_experiment_plan(args.experiment_plan) if args.experiment_plan else None)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     if _port_in_use(args.host, args.port):
         print(f"[!] A server is already listening on {args.host}:{args.port} - probably a stale "
@@ -1276,12 +1639,15 @@ def main() -> int:
     }
     controller = CaptureController(
         args.label, Path(args.outdir), mode_override=override,
-        reference_settings=reference_settings)
+        reference_settings=reference_settings, experiment_plan=experiment_plan)
     app = make_app(controller, args.label, args.unit, args.vmin, args.vmax,
                    nstates, state_values, instructions, args.window, args.guard, args.mode)
     busmode = ("forced silent" if override is True else "forced ACK" if override is False
                else "from bus.json profile")
     print(f"Sync UI on http://{args.host}:{args.port}  (mode: {args.mode}, capture: {busmode})")
+    if experiment_plan is not None:
+        print(f"Guided experiment: {experiment_plan['objective']} "
+              f"({len(experiment_plan['steps'])} steps; one continuous CAN run)")
     print(f"Per-run files -> {args.outdir}/trace_{args.label}_<N>.csv + sidecar_{args.label}_<N>.csv")
     print("Each run is tagged holds/sweep with timestamped phase markers in the runs index. "
           "Click Start to record. Ctrl-C to stop.")

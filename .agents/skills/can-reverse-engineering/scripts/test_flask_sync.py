@@ -81,9 +81,26 @@ class CaptureControllerTests(unittest.TestCase):
                 "rows": list(rows)}
 
     @staticmethod
-    def event(event_id: str, epoch: float, phase: str, note: str = "") -> dict:
-        return {"id": event_id, "run": int(event_id.split(":", 1)[0]),
-                "epoch": epoch, "phase": phase, "note": note}
+    def event(event_id: str, epoch: float, phase: str, note: str = "", **extra) -> dict:
+        event = {"id": event_id, "run": int(event_id.split(":", 1)[0]),
+                 "epoch": epoch, "phase": phase, "note": note}
+        event.update(extra)
+        return event
+
+    @staticmethod
+    def plan() -> dict:
+        return {
+            "version": 1,
+            "objective": "Separate angle from rate",
+            "context": "Stationary controlled setup",
+            "steps": [
+                {"phase": "baseline", "instruction": "Hold centered"},
+                {"phase": "stimulus", "instruction": "Turn slowly left",
+                 "expected_observation": "Rate peaks only during motion",
+                 "reason": "Separates position from rate"},
+                {"phase": "return", "instruction": "Return to center"},
+            ],
+        }
 
     def test_loads_legacy_index_without_changing_old_record(self) -> None:
         legacy = {
@@ -100,6 +117,148 @@ class CaptureControllerTests(unittest.TestCase):
 
         self.assertEqual(controller.runs, [legacy])
         self.assertEqual(controller.run_n, 4)
+
+    def test_experiment_plan_loader_normalizes_valid_schema(self) -> None:
+        path = self.outdir / "plan.json"
+        path.write_text(json.dumps(self.plan()), encoding="utf-8")
+
+        plan = flask_sync.load_experiment_plan(path)
+
+        self.assertEqual(plan, self.plan())
+        self.assertEqual(plan["steps"][1]["phase"], "stimulus")
+
+    def test_experiment_plan_loader_rejects_invalid_schema(self) -> None:
+        invalid = [
+            [],
+            {"version": 2, "objective": "x", "steps": [{}]},
+            {"version": 1, "objective": "", "steps": [{}]},
+            {"version": 1, "objective": "x", "steps": []},
+            {"version": 1, "objective": "x", "steps": [
+                {"phase": "unexpected", "instruction": "not planned"}]},
+            {"version": 1, "objective": "x", "steps": [
+                {"phase": "baseline", "instruction": "x", "timer": 5}]},
+        ]
+        path = self.outdir / "plan.json"
+        for document in invalid:
+            with self.subTest(document=document):
+                path.write_text(json.dumps(document), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    flask_sync.load_experiment_plan(path)
+        path.write_text("{truncated", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "invalid experiment plan JSON"):
+            flask_sync.load_experiment_plan(path)
+
+    def test_guided_run_persists_static_plan_snapshot(self) -> None:
+        source = self.plan()
+        controller = self.controller(experiment_plan=source)
+        source["objective"] = "mutated after construction"
+        with fake_capture():
+            controller.start("sweep", mode="sweep")
+            record = self.read_index()[0]
+            controller.stop()
+
+        self.assertEqual(record["experiment_plan"], self.plan())
+        self.assertEqual(record["events"], [])
+
+    def test_guided_progression_is_server_authoritative(self) -> None:
+        controller = self.controller(experiment_plan=self.plan())
+        with fake_capture():
+            controller.start("sweep", mode="sweep")
+            self.assertEqual(controller.plan_progress(1),
+                             {"step": 1, "total": 3, "state": "before"})
+            with self.assertRaises(ValueError):
+                controller.add_event(1, self.event("1:guide:9", 9.0, "baseline"))
+            finish_first = self.event(
+                "1:guide:1", 10.0, "baseline", step=1, boundary="finish")
+            with self.assertRaises(flask_sync.RunConflictError):
+                controller.add_event(1, finish_first)
+            wrong_phase = self.event(
+                "1:guide:2", 10.0, "stimulus", step=1, boundary="start")
+            with self.assertRaises(flask_sync.RunConflictError):
+                controller.add_event(1, wrong_phase)
+
+            start = self.event(
+                "1:guide:3", 10.0, "baseline", step=1, boundary="start")
+            self.assertEqual(controller.add_event(1, start), "1:guide:3")
+            self.assertEqual(controller.add_event(1, start), "1:guide:3")
+            duplicate_start = self.event(
+                "1:other:1", 10.1, "baseline", step=1, boundary="start")
+            with self.assertRaises(flask_sync.RunConflictError):
+                controller.add_event(1, duplicate_start)
+            early_next = self.event(
+                "1:guide:4", 10.2, "stimulus", step=2, boundary="start")
+            with self.assertRaises(flask_sync.RunConflictError):
+                controller.add_event(1, early_next)
+
+            finish = self.event(
+                "1:guide:5", 11.0, "baseline", step=1, boundary="finish")
+            controller.add_event(1, finish)
+            self.assertEqual(controller.plan_progress(1),
+                             {"step": 2, "total": 3, "state": "before"})
+            for number, phase in ((2, "stimulus"), (3, "return")):
+                controller.add_event(1, self.event(
+                    f"1:guide:{number * 10}", number * 10.0, phase,
+                    step=number, boundary="start"))
+                controller.add_event(1, self.event(
+                    f"1:guide:{number * 10 + 1}", number * 10.0 + 1, phase,
+                    step=number, boundary="finish"))
+            self.assertEqual(controller.plan_progress(1),
+                             {"step": 3, "total": 3, "state": "complete"})
+            with self.assertRaises(flask_sync.RunConflictError):
+                controller.add_event(1, self.event(
+                    "1:guide:99", 99.0, "return", step=3, boundary="finish"))
+            controller.stop()
+
+        self.assertEqual(self.read_index()[0]["events"], [
+            {"epoch": 10.0, "phase": "baseline", "step": 1, "boundary": "start"},
+            {"epoch": 11.0, "phase": "baseline", "step": 1, "boundary": "finish"},
+            {"epoch": 20.0, "phase": "stimulus", "step": 2, "boundary": "start"},
+            {"epoch": 21.0, "phase": "stimulus", "step": 2, "boundary": "finish"},
+            {"epoch": 30.0, "phase": "return", "step": 3, "boundary": "start"},
+            {"epoch": 31.0, "phase": "return", "step": 3, "boundary": "finish"},
+        ])
+
+    def test_guided_same_id_different_boundary_is_rejected(self) -> None:
+        controller = self.controller(experiment_plan=self.plan())
+        start = self.event("1:guide:1", 10.0, "baseline", step=1, boundary="start")
+        changed = self.event("1:guide:1", 10.0, "baseline", step=1, boundary="finish")
+        with fake_capture():
+            controller.start("sweep", mode="sweep")
+            controller.add_event(1, start)
+            with self.assertRaises(flask_sync.RunConflictError):
+                controller.add_event(1, changed)
+            controller.stop()
+
+    def test_unexpected_marker_does_not_advance_guided_plan(self) -> None:
+        controller = self.controller(experiment_plan=self.plan())
+        with fake_capture():
+            controller.start("sweep", mode="sweep")
+            controller.add_event(1, self.event(
+                "1:guide:1", 10.0, "unexpected", "operator paused"))
+            self.assertEqual(controller.plan_progress(1),
+                             {"step": 1, "total": 3, "state": "before"})
+            controller.stop()
+
+        self.assertEqual(self.read_index()[0]["events"], [
+            {"epoch": 10.0, "phase": "unexpected", "note": "operator paused"}])
+
+    def test_pending_guided_boundary_in_stop_is_idempotent(self) -> None:
+        controller = self.controller(experiment_plan=self.plan())
+        app = flask_sync.make_app(
+            controller, "run", "%", 0, 100, 2, [0, 100], "test", 2.0, 0.0, "both")
+        event = self.event(
+            "1:guide:1", 10.0, "baseline", step=1, boundary="start")
+        payload = {"run": 1, "batches": [], "events": [event]}
+        with fake_capture():
+            controller.start("sweep", mode="sweep")
+            first = app.test_client().post("/api/capture/stop", json=payload)
+            retry = app.test_client().post("/api/capture/stop", json=payload)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.get_json()["accepted_event_ids"], ["1:guide:1"])
+        self.assertEqual(self.read_index()[0]["events"], [
+            {"epoch": 10.0, "phase": "baseline", "step": 1, "boundary": "start"}])
 
     def test_next_run_uses_highest_index_or_artifact_number(self) -> None:
         legacy = {"n": 3, "note": "holds", "frames": 1,
@@ -699,6 +858,56 @@ class CaptureControllerTests(unittest.TestCase):
         self.assertIn("request timed out; data retained for retry", page)
         self.assertIn("settleEventRequests", page)
         self.assertIn("retry stop", page)
+
+    def test_manual_page_is_unchanged_without_experiment_plan(self) -> None:
+        controller = self.controller()
+        app = flask_sync.make_app(
+            controller, "run", "%", 0, 100, 2, [0, 100], "test", 2.0, 0.0, "both")
+        page = app.test_client().get("/").get_data(as_text=True)
+
+        self.assertNotIn('id="guide"', page)
+        self.assertNotIn('id="maneuver-btn"', page)
+        for phase in ("baseline", "stimulus", "return", "unexpected"):
+            self.assertIn(f'data-phase="{phase}"', page)
+
+    def test_guided_page_exposes_plan_and_reuses_retry_protocol(self) -> None:
+        controller = self.controller(experiment_plan=self.plan())
+        app = flask_sync.make_app(
+            controller, "run", "%", 0, 100, 2, [0, 100], "test", 2.0, 0.0, "both")
+        page = app.test_client().get("/").get_data(as_text=True)
+
+        self.assertIn('id="guide"', page)
+        self.assertIn('id="maneuver-btn"', page)
+        self.assertIn("CAPTURING CAN DATA", page)
+        self.assertIn("pendingGuideEvent", page)
+        self.assertIn("const event = pendingGuideEvent", page)
+        self.assertIn("applyPlanProgress(result.plan_progress, event.run)", page)
+        self.assertIn("progressRank(progress) < progressRank(planProgress)", page)
+        self.assertNotIn('data-phase="baseline"', page)
+        self.assertNotIn('data-phase="stimulus"', page)
+        self.assertNotIn('data-phase="return"', page)
+        self.assertIn('data-phase="unexpected"', page)
+        self.assertIn("mode: \"both\"", page)
+
+    def test_status_reconstructs_guided_progress_after_page_reload(self) -> None:
+        controller = self.controller(experiment_plan=self.plan())
+        app = flask_sync.make_app(
+            controller, "run", "%", 0, 100, 2, [0, 100], "test", 2.0, 0.0, "both")
+        with fake_capture():
+            controller.start("sweep", mode="sweep")
+            response = app.test_client().post("/api/event", json={
+                "run": 1,
+                "event": self.event(
+                    "1:guide:1", 10.0, "baseline", step=1, boundary="start"),
+            })
+            reloaded = app.test_client().get("/api/capture/status")
+            controller.stop()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["plan_progress"],
+                         {"step": 1, "total": 3, "state": "active"})
+        self.assertEqual(reloaded.get_json()["plan_progress"],
+                         {"step": 1, "total": 3, "state": "active"})
 
 
 if __name__ == "__main__":
