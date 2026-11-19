@@ -27,6 +27,11 @@ This is an analysis workflow rather than a turnkey vehicle decoder. A
 reference-free result is a hypothesis to investigate, not a confirmed signal;
 shipping a DBC definition still requires independent evidence and verification.
 
+The [technical review from 2026-11-19](docs/review-2026-11-19.md) records the
+tested baseline, known verification and message-grouping limitations, and steps
+for continuing development on another machine. This snapshot retains those
+known limitations; a `PASS` alone does not establish correct calibration.
+
 ## What works offline
 
 After Python dependencies have been installed, the core workflow runs locally
